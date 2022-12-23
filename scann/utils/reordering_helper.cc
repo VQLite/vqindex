@@ -351,6 +351,22 @@ FixedPointFloatDenseDotProductReorderingHelper::
 FixedPointFloatDenseDotProductReorderingHelper::
     ~FixedPointFloatDenseDotProductReorderingHelper() {}
 
+Status FixedPointFloatDenseDotProductReorderingHelper::
+        AddPointsDataset(shared_ptr<DenseDataset<float>> add_dataset, 
+        double noise_shaping_threshold) const {
+
+  std::vector<float> multiplier_by_dimension = inverse_multipliers_;
+  for (int i=0; i<multiplier_by_dimension.size(); i++) 
+    multiplier_by_dimension[i] = 1.0f / multiplier_by_dimension[i];
+  ScalarQuantizationResults sq_res = ScalarQuantizeFloatDatasetWithMultipliers(*add_dataset, 
+        multiplier_by_dimension, noise_shaping_threshold);
+    
+  for (size_t dp_idx : Seq(sq_res.quantized_dataset.size())) {
+    fixed_point_dataset_->Append(sq_res.quantized_dataset[dp_idx], "");
+  }
+  return OkStatus();
+}
+
 Status
 FixedPointFloatDenseDotProductReorderingHelper::ComputeDistancesForReordering(
     const DatapointPtr<float>& query, NNResultsVector* result) const {

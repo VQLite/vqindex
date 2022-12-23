@@ -225,6 +225,26 @@ Status ScannInterface::Initialize(shared_ptr<DenseDataset<float>> dataset,
   return OkStatus();
 }
 
+Status ScannInterface::Initialize(std::vector<float> &dataset,
+                                  DatapointIndex n_points,
+                                  const std::string& config,
+                                  int training_threads, bool is_recycle) {
+  SCANN_RETURN_IF_ERROR(ParseTextProto(&config_, config));
+  if (training_threads < 0)
+    return InvalidArgumentError("training_threads must be non-negative");
+  if (training_threads == 0) training_threads = GetNumCPUs();
+  SingleMachineFactoryOptions opts;
+
+  opts.parallelization_pool =
+      StartThreadPool("scann_threadpool", training_threads - 1);  
+  
+  shared_ptr<DenseDataset<float>> dataset_den = std::make_unique<DenseDataset<float>>(std::move(dataset), n_points);
+  Status ret = Initialize(dataset_den, opts);
+  if (is_recycle || !ret.ok())
+    dataset = dataset_den->ClearRecyclingDataVector();
+  return ret;
+}
+
 SearchParameters ScannInterface::GetSearchParameters(int final_nn,
                                                      int pre_reorder_nn,
                                                      int leaves) const {
@@ -388,6 +408,30 @@ StatusOr<ScannAssets> ScannInterface::Serialize(std::string path) {
 
 StatusOr<SingleMachineFactoryOptions> ScannInterface::ExtractOptions() {
   return scann_->ExtractSingleMachineFactoryOptions();
+}
+
+int ScannInterface::Add2Index(std::vector<float> &dataset, uint32_t npoints, int32_t nthreads) {
+  if (npoints * dimensionality_ != dataset.size()) {
+    LOG(INFO) << "dataset.size[" << dataset.size() << "] != doc_num["
+              << npoints << "] * dim[" << dimensionality_ << "]";
+    return -1;
+  }
+  LOG(INFO) << "npoints=" << npoints << "; dataset.size()=" << dataset.size() << std::endl;
+
+  shared_ptr<DenseDataset<float>> add_dataset = 
+      make_shared<DenseDataset<float>>(dataset, npoints);
+
+  int32_t num_threads = nthreads;
+  if (num_threads <= 0 || num_threads > GetNumCPUs()) {
+    num_threads = GetNumCPUs() - 1;
+  }
+  std::unique_ptr<ThreadPool> pool = StartThreadPool("AddIndex", num_threads);
+  Status ret = scann_->Add2Index(add_dataset, pool.get());
+  if (!ret.ok()) {
+    return -1;
+  }
+  n_points_ += npoints;
+  return 0;
 }
 
 }  // namespace research_scann

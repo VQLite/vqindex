@@ -52,6 +52,11 @@ class ScannInterface {
       shared_ptr<DenseDataset<float>> dataset,
       SingleMachineFactoryOptions opts = SingleMachineFactoryOptions());
 
+  Status Initialize(std::vector<float> &dataset,
+                                  DatapointIndex n_points,
+                                  const std::string& config,
+                                  int training_threads, bool is_recycle);
+
   Status Search(const DatapointPtr<float> query, NNResultsVector* res,
                 int final_nn, int pre_reorder_nn, int leaves) const;
   Status SearchBatched(const DenseDataset<float>& queries,
@@ -77,6 +82,12 @@ class ScannInterface {
   size_t n_points() const { return n_points_; }
   DimensionIndex dimensionality() const { return dimensionality_; }
   const ScannConfig* config() const { return &config_; }
+
+  int Add2Index(std::vector<float> &dataset, uint32_t npoints, int32_t nthreads);
+
+  size_t GetPartitioningSize() {
+    return scann_->GetPartitioningSize();
+  }
 
  private:
   SearchParameters GetSearchParameters(int final_nn, int pre_reorder_nn,

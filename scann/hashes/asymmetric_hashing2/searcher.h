@@ -115,6 +115,8 @@ class Searcher final : public SingleMachineSearcherBase<T> {
   StatusOr<SingleMachineFactoryOptions> ExtractSingleMachineFactoryOptions()
       override;
 
+  Status AddSearcherPackedDataset(shared_ptr<DenseDataset<uint8_t>> hashed_dataset) override;  
+
  protected:
   Status FindNeighborsImpl(const DatapointPtr<T>& query,
                            const SearchParameters& params,

@@ -153,6 +153,76 @@ template <typename T>
 Searcher<T>::~Searcher() {}
 
 template <typename T>
+Status Searcher<T>::AddSearcherPackedDataset(
+    shared_ptr<DenseDataset<uint8_t>> hashed_dataset) {
+  if (hashed_dataset->size() == 0) {
+    return OkStatus();
+  }
+  if (packed_dataset_.num_blocks == 0) { 
+    packed_dataset_.num_blocks = (*hashed_dataset)[0].nonzero_entries(); 
+  }
+//   LOG(INFO) << "packed_dataset_=" << packed_dataset_.bit_packed_data.size();
+//   LOG(INFO) << "packed_dataset_.num_blocks=" << packed_dataset_.num_blocks;
+//   LOG(INFO) << "packed_dataset_=" << packed_dataset_.num_datapoints;
+  size_t num_blocks = packed_dataset_.num_blocks, old_num_datapoints = packed_dataset_.num_datapoints;
+  size_t new_total_num_datapoints = old_num_datapoints + hashed_dataset->size();
+  size_t begin32_idx = num_blocks * (old_num_datapoints/32) * 16;
+
+  size_t residue_num_points = old_num_datapoints % 32;
+  size_t now_num_points = hashed_dataset->size() + residue_num_points;
+  vector<uint8_t> hashed_dataset_tmp;
+  hashed_dataset_tmp.resize(num_blocks * now_num_points);
+  if (residue_num_points != 0) {
+    int idx = begin32_idx;
+    for (int dim = 0; dim < num_blocks; dim++) {
+      for (int offset = 0; offset < 16; offset++) {
+        uint8_t data = packed_dataset_.bit_packed_data[idx++];
+        int idx1 = offset, idx2 = 16 | offset;
+        if (idx1 < residue_num_points) hashed_dataset_tmp[idx1 * num_blocks + dim] = data & 15;
+        if (idx2 < residue_num_points) hashed_dataset_tmp[idx2 * num_blocks + dim] = data >> 4;
+      }
+    }
+  }
+//   LOG(INFO) << "residue_num_points=" << residue_num_points;
+  const uint8_t *p = hashed_dataset->data().data();
+  memcpy(hashed_dataset_tmp.data() + residue_num_points*num_blocks, p, num_blocks * hashed_dataset->size());
+
+  auto packed_dataset_tmp = ::research_scann::asymmetric_hashing2::CreatePackedDataset(
+            DenseDataset<uint8_t>(hashed_dataset_tmp, now_num_points));
+//   LOG(INFO) << "packed_dataset_tmp=" << packed_dataset_tmp.bit_packed_data.size();
+//   LOG(INFO) << "packed_dataset_tmp point=" << packed_dataset_tmp.num_datapoints;
+
+  size_t new_packed_size = num_blocks * ((new_total_num_datapoints + 31) & (~31)) / 2;
+  packed_dataset_.bit_packed_data.resize(new_packed_size + num_blocks * 10);
+  memcpy(packed_dataset_.bit_packed_data.data() + begin32_idx, 
+    packed_dataset_tmp.bit_packed_data.data(), packed_dataset_tmp.bit_packed_data.size());
+
+  const size_t l2_cache_bytes = 256 * 1024;
+  if (new_packed_size <= l2_cache_bytes / 2) {
+    optimal_low_level_batch_size_ = 3;
+    max_low_level_batch_size_ = 3;
+  } else {
+    if (RuntimeSupportsAvx2()) {
+      if (packed_dataset_.num_blocks <= 300) {
+        optimal_low_level_batch_size_ = 7;
+      } else {
+        optimal_low_level_batch_size_ = 5;
+      }
+    } else {
+      if (packed_dataset_.num_blocks <= 300) {
+        optimal_low_level_batch_size_ = 6;
+      } else {
+        optimal_low_level_batch_size_ = 5;
+      }
+    }
+  }
+
+  packed_dataset_.num_datapoints = new_total_num_datapoints;
+                                                                                                                           
+  return OkStatus();
+}
+
+template <typename T>
 Status Searcher<T>::VerifyLimitedInnerProductNormsSize() const {
   SCANN_RET_CHECK(limited_inner_product_);
 

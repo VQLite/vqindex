@@ -104,3 +104,32 @@ pybind_library(
         "@com_google_absl//absl/types:span",
     ],
 )
+
+cc_binary(
+    name = "vqindex_api",
+    srcs = ["vqindex_api.cc", "vqindex_api.h"],
+    tags = ["local"],
+    copts = [
+        "-pthread",
+    ],
+    deps = [
+        ":scann"
+    ],
+    linkopts = ["-lstdc++"],
+    linkshared = True
+)  
+
+cc_binary(
+    name = "vqindex_py",
+    srcs = ["vqindex_py.cc", "vqindex_api.cc", "vqindex_api.h"],
+    tags = ["local"],
+    copts = [
+        "-pthread",
+    ],
+    deps = [
+        ":scann",
+        "@local_config_python//:python_headers"
+    ],
+    linkopts = ["-lstdc++"],
+    linkshared = True
+) 

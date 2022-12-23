@@ -28,6 +28,7 @@
 #include "absl/flags/flag.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "absl/random/random.h"
 #include "scann/base/search_parameters.h"
 #include "scann/base/single_machine_base.h"
 #include "scann/distance_measures/distance_measure_factory.h"
@@ -131,7 +132,7 @@ vector<uint32_t> OrderLeafTokensByCenterNorm(
 template <typename GetResidual>
 StatusOr<DenseDataset<float>> ComputeResidualsImpl(
     const DenseDataset<float>& dataset, GetResidual get_residual,
-    ConstSpan<std::vector<DatapointIndex>> datapoints_by_token) {
+    ConstSpan<std::vector<DatapointIndex>> datapoints_by_token, float expected_sample_prob) {
   const size_t dimensionality = dataset.dimensionality();
 
   vector<uint32_t> tokens_by_datapoint(dataset.size());
@@ -142,14 +143,23 @@ StatusOr<DenseDataset<float>> ComputeResidualsImpl(
     }
   }
 
+  if (expected_sample_prob <= 0) {
+    expected_sample_prob = 0.1;
+  }
+  int64_t expected_sample_size = dataset.size() * expected_sample_prob + 16;
   DenseDataset<float> residuals;
   residuals.set_dimensionality(dimensionality);
-  residuals.Reserve(dataset.size());
+  residuals.Reserve(expected_sample_size);
 
+  LOG(INFO) << "hash sample_prob=" << expected_sample_prob << "; expected_sample_size=" << expected_sample_size;
+
+  MTRandom rng(kDeterministicSeed + 1);
   for (size_t dp_idx : Seq(dataset.size())) {
+    if (absl::Uniform<float>(rng, 0, 1) > expected_sample_prob) continue;
     const uint32_t token = tokens_by_datapoint[dp_idx];
     TF_ASSIGN_OR_RETURN(auto residual, get_residual(dataset[dp_idx], token));
     residuals.AppendOrDie(residual, "");
+    if (residuals.size() >= expected_sample_size) break;
   }
 
   return residuals;
@@ -160,7 +170,7 @@ StatusOr<DenseDataset<float>> ComputeResidualsImpl(
 StatusOr<DenseDataset<float>> TreeAHHybridResidual::ComputeResiduals(
     const DenseDataset<float>& dataset,
     const DenseDataset<float>& kmeans_centers,
-    ConstSpan<std::vector<DatapointIndex>> datapoints_by_token) {
+    ConstSpan<std::vector<DatapointIndex>> datapoints_by_token, float expected_sample_prob) {
   DCHECK(!kmeans_centers.empty());
   DCHECK_EQ(kmeans_centers.size(), datapoints_by_token.size());
   DCHECK_EQ(kmeans_centers.dimensionality(), dataset.dimensionality());
@@ -179,14 +189,14 @@ StatusOr<DenseDataset<float>> TreeAHHybridResidual::ComputeResiduals(
     return MakeDatapointPtr(scratch);
   };
 
-  return ComputeResidualsImpl(dataset, get_residual, datapoints_by_token);
+  return ComputeResidualsImpl(dataset, get_residual, datapoints_by_token, expected_sample_prob);
 }
 
 StatusOr<DenseDataset<float>> TreeAHHybridResidual::ComputeResiduals(
     const DenseDataset<float>& dataset,
     const KMeansTreeLikePartitioner<float>* partitioner,
     ConstSpan<std::vector<DatapointIndex>> datapoints_by_token,
-    bool normalize_residual_by_cluster_stdev) {
+    bool normalize_residual_by_cluster_stdev, float expected_sample_prob) {
   Datapoint<float> residual;
   auto get_residual =
       [&](const DatapointPtr<float>& dptr,
@@ -196,7 +206,7 @@ StatusOr<DenseDataset<float>> TreeAHHybridResidual::ComputeResiduals(
                             dptr, token, normalize_residual_by_cluster_stdev));
     return residual.ToPtr();
   };
-  return ComputeResidualsImpl(dataset, get_residual, datapoints_by_token);
+  return ComputeResidualsImpl(dataset, get_residual, datapoints_by_token, expected_sample_prob);
 }
 
 StatusOr<uint8_t> TreeAHHybridResidual::ComputeGlobalTopNShift(
@@ -262,6 +272,9 @@ Status TreeAHHybridResidual::BuildLeafSearchers(
         "Cannot learn ckmeans when building a TreeAHHybridResidual with "
         "pre-training.");
   }
+
+  asymmetric_hasher_config_ = config;
+
   TF_ASSIGN_OR_RETURN(shared_ptr<const ChunkingProjection<float>> projector,
                       ChunkingProjectionFactory<float>(config.projection()));
   TF_ASSIGN_OR_RETURN(auto quantization_distance,
@@ -271,7 +284,7 @@ Status TreeAHHybridResidual::BuildLeafSearchers(
                                                 Datapoint<uint8_t>*)>
       get_hashed_datapoint;
   Datapoint<uint8_t> hashed_dp_storage;
-  auto indexer = make_shared<asymmetric_hashing2::Indexer<float>>(
+  indexer_ = make_shared<asymmetric_hashing2::Indexer<float>>(
       projector, quantization_distance, ah_model);
   const auto dataset =
       dynamic_cast<const DenseDataset<float>*>(this->dataset());
@@ -299,9 +312,9 @@ Status TreeAHHybridResidual::BuildLeafSearchers(
           partitioner->ResidualizeToFloat(original, token,
                                           normalize_residual_by_cluster_stdev));
       if (std::isnan(config.noise_shaping_threshold())) {
-        SCANN_RETURN_IF_ERROR(indexer->Hash(residual.ToPtr(), storage));
+        SCANN_RETURN_IF_ERROR(indexer_->Hash(residual.ToPtr(), storage));
       } else {
-        SCANN_RETURN_IF_ERROR(indexer->HashWithNoiseShaping(
+        SCANN_RETURN_IF_ERROR(indexer_->HashWithNoiseShaping(
             residual.ToPtr(), original, storage,
             {.threshold = config.noise_shaping_threshold()}));
       }
@@ -335,7 +348,7 @@ Status TreeAHHybridResidual::BuildLeafSearchers(
       SCANN_RETURN_IF_ERROR(local_status);
     }
     asymmetric_hashing2::SearcherOptions<float> opts(asymmetric_queryer_,
-                                                     indexer);
+                                                     indexer_);
     opts.set_asymmetric_lookup_type(lookup_type_tag_);
     opts.set_noise_shaping_threshold(config.noise_shaping_threshold());
     leaf_searchers_[token] = make_unique<asymmetric_hashing2::Searcher<float>>(
@@ -709,6 +722,96 @@ void TreeAHHybridResidual::AttemptEnableGlobalTopN() {
   }
   global_topn_shift_ = status_or_shift.ValueOrDie();
   enable_global_topn_ = true;
+}
+
+Status TreeAHHybridResidual::Add2Index(shared_ptr<DenseDataset<float>> add_dataset, ThreadPool* pool) {
+  if (add_dataset.get() == nullptr) {
+    LOG(INFO) << "not reordering, dataset_ is nullptr";
+    return UnavailableError("add_dataset null");
+  }
+
+  auto status_or_dt = database_tokenizer_->TokenizeDatabase(*add_dataset, pool);
+  vector<std::vector<DatapointIndex>> datapoints_by_token = std::move(status_or_dt.ValueOrDie());
+  if (datapoints_by_token.size() < database_tokenizer_->n_tokens()) {
+    datapoints_by_token.resize(database_tokenizer_->n_tokens());
+  }
+
+  //LOG(INFO) << "datapoints_by_token.size=" << datapoints_by_token.size();
+  //for (size_t i : Seq(datapoints_by_token.size())) {
+  //  for (size_t j : Seq(datapoints_by_token[i].size())) {
+  //      LOG(INFO) << "i=" << i << "; j=" << j << "; value=" << datapoints_by_token[i][j];
+  //  }
+  //}
+
+  const bool normalize_residual_by_cluster_stdev =
+      asymmetric_hasher_config_.use_normalized_residual_quantization();
+
+  std::function<StatusOr<DatapointPtr<uint8_t>>(DatapointIndex, int32_t,
+                                                Datapoint<uint8_t>*)>
+      get_hashed_datapoint = [&](DatapointIndex i, int32_t token,
+            Datapoint<uint8_t>* storage) -> StatusOr<DatapointPtr<uint8_t>> {
+    DCHECK(add_dataset);
+    DatapointPtr<float> original = (*add_dataset)[i];
+    TF_ASSIGN_OR_RETURN(
+        Datapoint<float> residual,
+        query_tokenizer_->ResidualizeToFloat(original, token,
+                                        normalize_residual_by_cluster_stdev));
+    if (std::isnan(asymmetric_hasher_config_.noise_shaping_threshold())) {
+      SCANN_RETURN_IF_ERROR(indexer_->Hash(residual.ToPtr(), storage));
+    } else {
+      SCANN_RETURN_IF_ERROR(indexer_->HashWithNoiseShaping(
+          residual.ToPtr(), original, storage,
+          {.threshold = asymmetric_hasher_config_.noise_shaping_threshold()}));
+    }
+    return storage->ToPtr();
+  };
+
+  auto build_leaf_for_token = [&](size_t token) -> Status {
+    const absl::Time token_start = absl::Now();
+    auto hashed_partition = make_shared<DenseDataset<uint8_t>>();
+    if (asymmetric_queryer_->quantization_scheme() ==
+        AsymmetricHasherConfig::PRODUCT_AND_PACK) {
+      hashed_partition->set_packing_strategy(HashedItem::NIBBLE);
+    }
+
+    Datapoint<uint8_t> dp;
+    Datapoint<uint8_t> hashed_storage;
+    for (DatapointIndex dp_index : datapoints_by_token[token]) {
+      auto status_or_hashed_dptr =
+          get_hashed_datapoint(dp_index, token, &hashed_storage);
+      SCANN_RETURN_IF_ERROR(status_or_hashed_dptr.status());
+      auto hashed_dptr = status_or_hashed_dptr.ValueOrDie();
+      auto local_status = hashed_partition->Append(hashed_dptr, "");
+      SCANN_RETURN_IF_ERROR(local_status);
+    }
+
+    size_t n_token = datapoints_by_token[token].size();
+    for (size_t i = 0; i < n_token; ++i) {
+      datapoints_by_token[token][i] += num_datapoints_;
+      datapoints_by_token_[token].push_back(datapoints_by_token[token][i]);
+    }
+    //if (hashed_partition->size() != 0) {
+    //    LOG(INFO) << hashed_partition->size() << "; token=" << token << "; num_blocks=" << (*hashed_partition)[0].nonzero_entries();
+    //}
+
+    leaf_searchers_[token]->AddSearcherPackedDataset(hashed_partition);
+
+    //LOG(INFO) << "Built leaf searcher " << token + 1 << " of "
+    //        << datapoints_by_token.size()
+    //        << " (size = " << datapoints_by_token[token].size() << " DPs) in "
+    //        << absl::ToDoubleSeconds(absl::Now() - token_start) << " sec.";
+    return OkStatus();
+  };
+
+  SCANN_RETURN_IF_ERROR(ParallelForWithStatus<1>(IndicesOf(datapoints_by_token),
+                                                 pool, build_leaf_for_token));
+
+  this->AddReorderingPointsDataset(add_dataset, asymmetric_hasher_config_.noise_shaping_threshold());
+
+  LOG(INFO) << "old_num_datapoints_=" << num_datapoints_ << "; add_dataset=" << add_dataset->size();
+  num_datapoints_ += add_dataset->size();
+
+  return OkStatus();                                                                                                                         
 }
 
 }  // namespace research_scann

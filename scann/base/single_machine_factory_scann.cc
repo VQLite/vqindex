@@ -220,13 +220,18 @@ StatusOrSearcherUntyped TreeAhHybridResidualFactory<float>(
         auto quantization_distance,
         GetDistanceMeasure(
             config.hash().asymmetric_hash().quantization_distance()));
+
+    float expected_sample_prob = 0.1;
+    if (config.hash().asymmetric_hash().expected_sample_size() > 0 && dense->size() > 0) {
+      expected_sample_prob = 1.0*config.hash().asymmetric_hash().expected_sample_size()/dense->size();
+    }
     TF_ASSIGN_OR_RETURN(
         auto residuals,
         TreeAHHybridResidual::ComputeResiduals(
             *dense, kmeans_tree_partitioner.get(), datapoints_by_token,
             config.hash()
                 .asymmetric_hash()
-                .use_normalized_residual_quantization()));
+                .use_normalized_residual_quantization(), expected_sample_prob));
     asymmetric_hashing2::TrainingOptions<float> training_opts(
         config.hash().asymmetric_hash(), quantization_distance, residuals);
     TF_ASSIGN_OR_RETURN(

@@ -66,6 +66,11 @@ class ReorderingInterface {
   virtual void AppendDataToSingleMachineFactoryOptions(
       SingleMachineFactoryOptions* opts) const {}
 
+  virtual Status AddPointsDataset(shared_ptr<DenseDataset<float>> add_dataset,                                           
+        double noise_shaping_threshold) const = 0;
+
+  virtual shared_ptr<DenseDataset<int8_t>> hashed_datasets() const = 0;
+
   virtual ~ReorderingInterface() {}
 };
 
@@ -93,6 +98,16 @@ class ReorderingHelper : public ReorderingInterface<T> {
                this->name(), "."));
   }
   bool owns_mutation_data_structures() const override { return true; }
+
+  virtual Status AddPointsDataset(shared_ptr<DenseDataset<float>> add_dataset, 
+        double noise_shaping_threshold) const override {
+    LOG(INFO) << "ReorderingHelper::AddPointsDataset";
+    return OkStatus();
+  }
+
+  virtual shared_ptr<DenseDataset<int8_t>> hashed_datasets() const override {
+    return nullptr;
+  }
 };
 
 template <typename T>
@@ -168,6 +183,13 @@ class FixedPointFloatDenseDotProductReorderingHelper
     opts->pre_quantized_fixed_point =
         make_shared<PreQuantizedFixedPoint>(CreatePreQuantizedFixedPoint(
             *fixed_point_dataset_, inverse_multipliers_, {}, true));
+  }
+
+  Status AddPointsDataset(shared_ptr<DenseDataset<float>> add_dataset, 
+        double noise_shaping_threshold) const override;
+
+  shared_ptr<DenseDataset<int8_t>> hashed_datasets() const override {
+    return fixed_point_dataset_;
   }
 
  private:

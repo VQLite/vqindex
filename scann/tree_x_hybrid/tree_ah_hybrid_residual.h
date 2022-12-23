@@ -63,12 +63,12 @@ class TreeAHHybridResidual final : public SingleMachineSearcherBase<float> {
       const DenseDataset<float>& dataset,
       const KMeansTreeLikePartitioner<float>* partitioner,
       ConstSpan<std::vector<DatapointIndex>> datapoints_by_token,
-      bool normalize_residual_by_cluster_stdev = false);
+      bool normalize_residual_by_cluster_stdev = false, float expected_sample_prob = 0.1);
 
   static StatusOr<DenseDataset<float>> ComputeResiduals(
       const DenseDataset<float>& dataset,
       const DenseDataset<float>& kmeans_centers,
-      ConstSpan<std::vector<DatapointIndex>> datapoints_by_token);
+      ConstSpan<std::vector<DatapointIndex>> datapoints_by_token, float expected_sample_prob = 0.1);
 
   static StatusOr<uint8_t> ComputeGlobalTopNShift(
       ConstSpan<std::vector<DatapointIndex>> datapoints_by_token);
@@ -81,6 +81,13 @@ class TreeAHHybridResidual final : public SingleMachineSearcherBase<float> {
       override;
 
   void AttemptEnableGlobalTopN();
+
+  Status Add2Index(shared_ptr<DenseDataset<float>> add_dataset, 
+      ThreadPool* pool) override;
+
+  size_t GetPartitioningSize() override {
+    return leaf_searchers_.size();
+  }
 
  protected:
   bool impl_needs_dataset() const final { return leaf_searchers_.empty(); }
@@ -173,6 +180,9 @@ class TreeAHHybridResidual final : public SingleMachineSearcherBase<float> {
   bool enable_global_topn_ = false;
 
   uint8_t global_topn_shift_ = 0;
+
+  shared_ptr<asymmetric_hashing2::Indexer<float>> indexer_;  
+  AsymmetricHasherConfig asymmetric_hasher_config_;
 
   FRIEND_TEST(TreeAHHybridResidualTest, CrowdingMutation);
 };

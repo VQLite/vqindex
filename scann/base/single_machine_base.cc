@@ -108,7 +108,7 @@ Status UntypedSingleMachineSearcherBase::EnableCrowding(
 }
 
 StatusOr<DatapointIndex> UntypedSingleMachineSearcherBase::DatasetSize() const {
-  if (dataset()) {
+  if (dataset() && dataset()->size() > 0) {
     return dataset()->size();
   } else if (hashed_dataset()) {
     return hashed_dataset()->size();

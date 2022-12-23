@@ -322,6 +322,38 @@ class SingleMachineSearcherBase : public UntypedSingleMachineSearcherBase {
     return *reordering_helper_;
   }
 
+  virtual Status Add2Index(shared_ptr<DenseDataset<T>> add_dataset, ThreadPool* pool) {
+    LOG(INFO) << "SingleMachineSearcherBase::Add2Index: ";
+    if (dataset_ == nullptr) {
+        LOG(INFO) << "dataset_ is null";
+    }
+    return OkStatus();
+  }
+
+  virtual Status AddSearcherPackedDataset(shared_ptr<DenseDataset<uint8_t>> hashed_dataset) {
+    LOG(INFO) << "SingleMachineSearcherBase::AddSearcherPackedDataset";
+    return OkStatus();
+  }
+
+  virtual size_t GetPartitioningSize() {
+    LOG(INFO) << "SingleMachineSearcherBase::GetPartitioningSize";
+    return 0;
+  }
+
+  Status AddReorderingPointsDataset(shared_ptr<DenseDataset<float>> add_dataset, 
+        double noise_shaping_threshold) {
+    if (reordering_helper_) {
+        Status ret = reordering_helper_->AddPointsDataset(add_dataset, noise_shaping_threshold);
+        if (ret.ok()) {
+            shared_ptr<DenseDataset<int8_t>> fixed_datasets = reordering_helper_->hashed_datasets();
+            if (fixed_datasets != nullptr) {
+                docids_ = fixed_datasets->docids();
+            }
+        }
+    }
+    return OkStatus();
+  }
+
  protected:
   SingleMachineSearcherBase() {}
 
