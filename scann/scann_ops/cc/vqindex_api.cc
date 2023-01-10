@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <regex>
 
 #include <atomic>
 #include <mutex>
@@ -153,11 +154,11 @@ public:
 
         ResetImpl();
     }
-    virtual int ResetImpl() { LOG(INFO) << "ResetImpl Unavailable"; }
+    virtual void ResetImpl() { LOG(INFO) << "ResetImpl Unavailable"; }
 
     // add datasets to index, if the index already exists.
-    int Add(std::vector<float> &datasets, int32_t nthreads);
-    virtual int AddImpl(std::vector<float> &datasets, uint64_t npoints, int32_t nthreads)
+    int Add(std::vector<float>& datasets, int32_t nthreads);
+    virtual int AddImpl(std::vector<float>& datasets, uint64_t npoints, int32_t nthreads)
     {
         LOG(INFO) << "AddImpl Unavailable";
         return 0;
@@ -167,7 +168,8 @@ public:
     ret_code_t TrainDefault(uint32_t nlist, int32_t nthreads);
     ret_code_t TrainNew(uint32_t nlist, int32_t nthreads);
     ret_code_t TrainAdd(int32_t nthreads);
-    virtual int TrainImpl(std::vector<float> &datasets, uint64_t npoints, uint32_t nlist, int32_t nthreads)
+    virtual int TrainImpl(
+        std::vector<float>& datasets, uint64_t npoints, uint32_t nlist, int32_t nthreads)
     {
         LOG(INFO) << "TrainImpl Unavailable";
         return 0;
@@ -236,7 +238,7 @@ bool VQLiteIndex::Init()
             ret = true;
         }
         LOG(INFO) << "vids_size=" << vids_.size() << "; index_npoints=" << index_npoints
-                      << "; datasets_npoints=" << datasets_npoints;
+                  << "; datasets_npoints=" << datasets_npoints;
     }
     if (ret && storage_type_ == STORAGE_MEMORY) {
         LoadTrainDatasets(datasets_, 0);
@@ -250,7 +252,7 @@ bool VQLiteIndex::Init()
         } else {
             current_state_ = INDEX_STATE_NOINDEX;
         }
-        
+
         datasets_npoints_ = datasets_npoints;
     }
 
@@ -338,7 +340,8 @@ ret_code_t VQLiteIndex::AddDatasets(const float* datasets, uint64_t len, const i
 
         datasets_npoints_ += add_npoints;
     }
-    LOG(INFO) << "vids_.size=" << vids_.size() << "; dataset.size=" << datasets_.size() << "; vids_.capacity()=" << vids_.capacity();
+    LOG(INFO) << "vids_.size=" << vids_.size() << "; dataset.size=" << datasets_.size()
+              << "; vids_.capacity()=" << vids_.capacity();
 
     if (GetIndexPointsNum() > 0) {
         current_state_ = INDEX_STATE_READY;
@@ -349,7 +352,7 @@ ret_code_t VQLiteIndex::AddDatasets(const float* datasets, uint64_t len, const i
     return ret;
 }
 
-int VQLiteIndex::Add(std::vector<float> &datasets, int32_t nthreads)
+int VQLiteIndex::Add(std::vector<float>& datasets, int32_t nthreads)
 {
     if (datasets.size() % dim_ != 0) {
         return -1;
@@ -520,7 +523,7 @@ ret_code_t VQLiteIndex::Train(train_type_t train_type, uint32_t nlist, int32_t n
     } else {
         current_state_ = INDEX_STATE_NOINDEX;
     }
-    
+
     return ret;
 }
 
@@ -653,7 +656,7 @@ public:
         }
     }
 
-    inline string ReadFileString(const string& filename)
+    inline std::string ReadFileString(const string& filename)
     {
         std::ifstream in(filename);
         if (!in) {
@@ -663,6 +666,48 @@ public:
         string content(begin, end);
         in.close();
         return content;
+    }
+
+    std::string GetAssetsInfo(std::string& index_dir)
+    {
+        std::string assets_info = "assets { \n\
+                asset_type: AH_CENTERS \n\
+                asset_path: \"$index_dir/ah_codebook.pb\" \n\
+            } \n\
+            assets { \n\
+                asset_type: PARTITIONER \n\
+                asset_path: \"$index_dir/serialized_partitioner.pb\" \n\
+            }\n\
+            assets { \n\
+                asset_type: TOKENIZATION_NPY \n\
+                asset_path: \"$index_dir/datapoint_to_token.npy\" \n\
+            } \n\
+            assets { \n\
+                asset_type: AH_DATASET_NPY \n\
+                asset_path: \"$index_dir/hashed_dataset.npy\" \n\
+            } \n\
+            assets { \n\
+                asset_type: INT8_DATASET_NPY \n\
+                asset_path: \"$index_dir/int8_dataset.npy\" \n\
+            } \n\
+            assets { \n\
+                asset_type: INT8_MULTIPLIERS_NPY \n\
+                asset_path: \"$index_dir/int8_multipliers.npy\" \n\
+            } \n\
+            assets { \n\
+                asset_type: INT8_NORMS_NPY \n\
+                asset_path: \"$index_dir/dp_norms.npy\" \n\
+            }";
+
+        std::string assets_info_brute = "assets { \n\
+                asset_type: DATASET_NPY \n\
+                asset_path: \"$index_dir/dataset.npy\" \n\
+            }";
+
+        if (is_brute_) {
+            return std::regex_replace(assets_info_brute, std::regex("\\$index_dir"), index_dir);
+        }
+        return std::regex_replace(assets_info, std::regex("\\$index_dir"), index_dir);
     }
 
     bool CheckIndexFiles(std::string& index_dir)
@@ -783,9 +828,9 @@ public:
     }
 
     bool InitImpl(std::string& index_dir) override;
-    int AddImpl(std::vector<float> &datasets, uint64_t npoints, int32_t nthreads) override;
+    int AddImpl(std::vector<float>& datasets, uint64_t npoints, int32_t nthreads) override;
     int TrainImpl(
-        std::vector<float> &datasets, uint64_t npoints, uint32_t nlist, int32_t nthreads) override;
+        std::vector<float>& datasets, uint64_t npoints, uint32_t nlist, int32_t nthreads) override;
     int DumpImpl(std::string& index_dir) override;
     int SearchImpl(const float* queries, int32_t npoints, std::vector<result_search_t>& res,
         params_search_t params) override;
@@ -798,7 +843,7 @@ public:
         return scann_handler_->n_points();
     }
 
-    int ResetImpl() override
+    void ResetImpl() override
     {
         if (scann_handler_ != NULL) {
             delete scann_handler_;
@@ -838,11 +883,7 @@ bool VQLiteIndexScann::InitImpl(std::string& index_dir)
         return false;
     }
 
-    string scann_assets_pbtxt = ReadFileString(string(index_dir) + "/scann_assets.pbtxt");
-    if (scann_assets_pbtxt.empty()) {
-        delete scann_handler;
-        return false;
-    }
+    string scann_assets_pbtxt = GetAssetsInfo(index_dir);
 
     ScannConfig config;
     ReadProtobufFromFile(string(index_dir) + "/scann_config.pb", &config);
@@ -860,7 +901,7 @@ bool VQLiteIndexScann::InitImpl(std::string& index_dir)
     return true;
 }
 
-int VQLiteIndexScann::AddImpl(std::vector<float> &datasets, uint64_t npoints, int32_t nthreads)
+int VQLiteIndexScann::AddImpl(std::vector<float>& datasets, uint64_t npoints, int32_t nthreads)
 {
     if (this->scann_handler_ == NULL) {
         return -1;
@@ -874,7 +915,7 @@ int VQLiteIndexScann::AddImpl(std::vector<float> &datasets, uint64_t npoints, in
 }
 
 int VQLiteIndexScann::TrainImpl(
-    std::vector<float> &datasets, uint64_t npoints, uint32_t nlist, int32_t nthreads)
+    std::vector<float>& datasets, uint64_t npoints, uint32_t nlist, int32_t nthreads)
 {
     ScannInterface* scann_handler = new ScannInterface();
     if (scann_handler == NULL) {
@@ -892,7 +933,7 @@ int VQLiteIndexScann::TrainImpl(
         return -1;
     }
 
-    std::vector<float> *datasets_pre = &datasets, datasets_t;
+    std::vector<float>*datasets_pre = &datasets, datasets_t;
     if (is_brute_) {
         datasets_t = datasets;
         datasets_pre = &datasets_t;
@@ -1030,7 +1071,7 @@ ret_code_t vqindex_search(
     std::vector<result_search_t> res_t;
     ret_code_t ret_s = vql_index->Search(queries, len, res_t, params);
     if (ret_s == RET_CODE_OK) {
-        memcpy(res, res_t.data(), res_t.size() * sizeof(result_search_t));      
+        memcpy(res, res_t.data(), res_t.size() * sizeof(result_search_t));
     }
     return ret_s;
 }
@@ -1046,7 +1087,8 @@ ret_code_t vqindex_add(void* vql_handler, const float* datasets, uint64_t len, c
     return vql_index->AddDatasets(datasets, len, vids);
 }
 
-ret_code_t vqindex_train(void* vql_handler, train_type_t train_type, uint32_t nlist, int32_t nthreads)
+ret_code_t vqindex_train(
+    void* vql_handler, train_type_t train_type, uint32_t nlist, int32_t nthreads)
 {
     VQLiteIndex* vql_index = static_cast<VQLiteIndex*>(vql_handler);
     if (vql_index == NULL) {
