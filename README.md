@@ -3,6 +3,7 @@
 A simple vector search library based on Google scaNN, it only support Linux and MacOS.
 
 ## Build vqindex py
+centos need "-lstdc++fs"
 ```
 ./build.sh vqindex_py
 ```
