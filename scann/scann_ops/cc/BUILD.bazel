@@ -115,7 +115,7 @@ cc_binary(
     deps = [
         ":scann"
     ],
-    linkopts = ["-lstdc++"],
+    linkopts = ["-lstdc++", "-lstdc++fs"],
     linkshared = True
 )  
 
@@ -130,6 +130,6 @@ cc_binary(
         ":scann",
         "@local_config_python//:python_headers"
     ],
-    linkopts = ["-lstdc++"],
+    linkopts = ["-lstdc++", "-lstdc++fs"],
     linkshared = True
 ) 
