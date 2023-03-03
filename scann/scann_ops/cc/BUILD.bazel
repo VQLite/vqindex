@@ -115,7 +115,10 @@ cc_binary(
     deps = [
         ":scann"
     ],
-    linkopts = ["-lstdc++", "-lstdc++fs"],
+    linkopts = select({
+        "@platforms//os:macos": ["-lstdc++"],
+        "//conditions:default": ["-lstdc++", "-lstdc++fs"],
+    }),
     linkshared = True
 )  
 
@@ -130,6 +133,9 @@ cc_binary(
         ":scann",
         "@local_config_python//:python_headers"
     ],
-    linkopts = ["-lstdc++", "-lstdc++fs"],
+    linkopts = select({
+        "@platforms//os:macos": ["-lstdc++"],
+        "//conditions:default": ["-lstdc++", "-lstdc++fs"],
+    }),
     linkshared = True
 ) 

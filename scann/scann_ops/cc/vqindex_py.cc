@@ -248,6 +248,8 @@ static PyObject* _vqlite_release(PyObject* self, PyObject* args)
 
     void* vql_handler = (void*)(vql_handler_i);
     vqindex_release(vql_handler);
+
+    Py_RETURN_NONE;
 }
 
 static PyObject* _vqlite_stats(PyObject* self, PyObject* args)
