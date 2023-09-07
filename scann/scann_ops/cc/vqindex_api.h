@@ -7,6 +7,7 @@
 
 #ifndef VQLITE_API_H_
 #define VQLITE_API_H_
+
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -19,9 +20,9 @@ typedef enum {
     TRAIN_TYPE_ADD,
 } train_type_t;
 
-typedef enum { 
-    STORAGE_FILE, 
-    STORAGE_MEMORY 
+typedef enum {
+    STORAGE_FILE,
+    STORAGE_MEMORY
 } storage_type_t;
 
 typedef enum {
@@ -88,11 +89,11 @@ struct index_stats_s {
 };
 typedef struct index_stats_s index_stats_t;
 
-void* vqindex_init(const char* index_dir, index_config_t config_i);
+void *vqindex_init(const char *index_dir, index_config_t config_i);
 
-void vqindex_release(void* vql_handler);
+void vqindex_release(void *vql_handler);
 
-ret_code_t vqindex_dump(void* vql_handler);
+ret_code_t vqindex_dump(void *vql_handler);
 
 // if nlist=0, use default nlist, it's only available to New[train_type].
 // nlist: number of partitioning leaves, If a dataset has n points,
@@ -100,18 +101,23 @@ ret_code_t vqindex_dump(void* vql_handler);
 // of magnitude as sqrt(n) for a good balance of partitioning quality and
 // speed. num_leaves_to_search should be tuned based on recall target.
 ret_code_t vqindex_train(
-    void* vql_handler, train_type_t train_type, uint32_t nlist, int32_t nthreads);
+        void *vql_handler, train_type_t train_type, uint32_t nlist, int32_t nthreads);
+
+// use process to train
+ret_code_t vqindex_train_process(
+        void *vql_handler, train_type_t train_type, uint32_t nlist, int32_t nthreads);
+
 
 // len: number of datasets float, <npoint = dim_ / len>, <len % dim_ == 0>.
 // only add to datasets, not index.
 ret_code_t vqindex_add(
-    void* vql_handler, const float* datasets, uint64_t len, const int64_t* vids);
+        void *vql_handler, const float *datasets, uint64_t len, const int64_t *vids);
 
 // len: number of queries float, <len % dim_ == 0>
 ret_code_t vqindex_search(
-    void* vql_handler, const float* queries, int len, result_search_t* res, params_search_t params);
+        void *vql_handler, const float *queries, int len, result_search_t *res, params_search_t params);
 
-index_stats_t vqindex_stats(void* vql_handler);
+index_stats_t vqindex_stats(void *vql_handler);
 
 #ifdef __cplusplus
 }

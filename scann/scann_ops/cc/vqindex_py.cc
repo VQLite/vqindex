@@ -195,8 +195,8 @@ static PyObject* _vqlite_add(PyObject* self, PyObject* args)
 static PyObject* _vqlite_train(PyObject* self, PyObject* args)
 {
     intptr_t vql_handler_i = 0;
-    int train_type_i = 0, nthreads = 0, nlist=0;
-    if (!PyArg_ParseTuple(args, "Liii", &vql_handler_i, &train_type_i, &nlist, &nthreads)) {
+    int train_type_i = 0, nthreads = 0, nlist=0, is_process = 0;
+    if (!PyArg_ParseTuple(args, "Liii|i", &vql_handler_i, &train_type_i, &nlist, &nthreads, &is_process)) {
         Py_RETURN_FALSE;
     }
 
@@ -211,7 +211,11 @@ static PyObject* _vqlite_train(PyObject* self, PyObject* args)
     void* vql_handler = (void*)(vql_handler_i);
     ret_code_t ret_t = RET_CODE_OK;
     Py_BEGIN_ALLOW_THREADS;
-    ret_t = vqindex_train(vql_handler, train_type, nlist, nthreads);
+    if (!is_process) {
+        ret_t = vqindex_train(vql_handler, train_type, nlist, nthreads);
+    } else {
+        ret_t = vqindex_train_process(vql_handler, train_type, nlist, nthreads);
+    }
     Py_END_ALLOW_THREADS;
 
     if (ret_t != RET_CODE_OK) {

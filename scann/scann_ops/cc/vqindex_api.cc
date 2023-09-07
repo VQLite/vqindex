@@ -7,11 +7,14 @@
 
 #include "scann/scann_ops/cc/vqindex_api.h"
 
+#include <stdio.h>
+#include <unistd.h>
+
 #include <filesystem>
 #include <fstream>
 #include <iterator>
-#include <string>
 #include <regex>
+#include <string>
 
 #include <atomic>
 #include <mutex>
@@ -19,6 +22,7 @@
 
 #include <chrono>
 #include <thread>
+#include<sys/wait.h>
 
 #include "scann/scann_ops/cc/scann.h"
 #include "scann/utils/io_oss_wrapper.h"
@@ -38,6 +42,7 @@ public:
         , current_state_(INDEX_STATE_NOINIT)
         , current_search_n_(0)
         , datasets_npoints_(0)
+        , is_child_process_(false)
     {
         index_root_dir_ = ".";
         if (index_root_dir != NULL) {
@@ -165,6 +170,7 @@ public:
     }
 
     ret_code_t Train(train_type_t train_type, uint32_t nlist, int32_t nthreads);
+    ret_code_t TrainProcess(train_type_t train_type, uint32_t nlist, int32_t nthreads);
     ret_code_t TrainDefault(uint32_t nlist, int32_t nthreads);
     ret_code_t TrainNew(uint32_t nlist, int32_t nthreads);
     ret_code_t TrainAdd(int32_t nthreads);
@@ -176,6 +182,7 @@ public:
     }
 
     ret_code_t Dump();
+    ret_code_t DoDump();
     virtual int DumpImpl(std::string& index_dir)
     {
         LOG(INFO) << "DumpImpl Unavailable";
@@ -218,6 +225,8 @@ protected:
     std::mutex mutex_global_lock_;
     std::shared_mutex smutex_vid_rwlock_;
     std::atomic<int> current_search_n_;
+
+    bool is_child_process_;
 
     index_state_t current_state_;
 };
@@ -527,7 +536,40 @@ ret_code_t VQLiteIndex::Train(train_type_t train_type, uint32_t nlist, int32_t n
     return ret;
 }
 
-ret_code_t VQLiteIndex::Dump()
+ret_code_t VQLiteIndex::TrainProcess(train_type_t train_type, uint32_t nlist, int32_t nthreads)
+{
+    is_child_process_ = true;
+
+    if (current_state_ > INDEX_STATE_READY) {
+        LOG(INFO) << "current_state_=" << current_state_;
+        return RET_CODE_NOREADY;
+    }
+
+    current_state_ = INDEX_STATE_TRAIN;
+
+    ret_code_t ret = RET_CODE_OK;
+    switch (train_type) {
+    case TRAIN_TYPE_NEW:
+        ret = TrainNew(nlist, nthreads);
+        break;
+    case TRAIN_TYPE_ADD:
+        ret = TrainAdd(nthreads);
+        break;
+    default:
+        ret = TrainDefault(nlist, nthreads);
+        break;
+    }
+
+    if (GetIndexPointsNum() > 0) {
+        current_state_ = INDEX_STATE_READY;
+    } else {
+        current_state_ = INDEX_STATE_NOINDEX;
+    }
+
+    return ret;
+}
+
+ret_code_t VQLiteIndex::DoDump()
 {
     std::error_code ec;
     std::string index_dir = index_root_dir_ + "/" + index_subdir_name_;
@@ -537,8 +579,6 @@ ret_code_t VQLiteIndex::Dump()
         LOG(INFO) << "current_state_=" << current_state_;
         return RET_CODE_NOREADY;
     }
-
-    std::lock_guard<std::mutex> guard(mutex_global_lock_);
 
     current_state_ = INDEX_STATE_DUMP;
 
@@ -589,6 +629,15 @@ end:
         current_state_ = INDEX_STATE_NOINDEX;
     }
     return ret;
+}
+
+ret_code_t VQLiteIndex::Dump()
+{
+    if (this->is_child_process_) {
+        return this->DoDump();
+    }
+    std::lock_guard<std::mutex> guard(mutex_global_lock_);
+    return this->DoDump();
 }
 
 ret_code_t VQLiteIndex::Search(
@@ -945,7 +994,7 @@ int VQLiteIndexScann::TrainImpl(
         return -1;
     }
 
-    if (this->scann_handler_ != NULL) {
+    if (!this->is_child_process_ && this->scann_handler_ != NULL) {
         delete this->scann_handler_;
     }
     this->scann_handler_ = scann_handler;
@@ -1097,6 +1146,44 @@ ret_code_t vqindex_train(
     }
     return vql_index->Train(train_type, nlist, nthreads);
 }
+
+ret_code_t vqindex_train_process(
+    void *vql_handler, train_type_t train_type, uint32_t nlist, int32_t nthreads)
+{
+    ret_code_t ret_code = RET_CODE_OK;
+    int child_status = 0;
+    pid_t pid = 0;
+
+    VQLiteIndex *vql_index = static_cast<VQLiteIndex *>(vql_handler);
+    if (vql_index == NULL) {
+        LOG(INFO) << "vql_handler NULL";
+        return RET_CODE_NOINIT;
+    }
+
+    pid = fork(); 
+    if (pid == -1) {
+        LOG(INFO) << "fork error.";
+        return RET_CODE_ERR;
+    } else if (pid == 0) {
+        LOG(INFO) << "in child process, pid=" << pid;
+        ret_code_t cret_code = vql_index->TrainProcess(train_type, nlist, nthreads);
+        if (cret_code == RET_CODE_OK) {
+            LOG(INFO) << "train suss, in dump.";
+            cret_code = vql_index->Dump();
+            LOG(INFO) << "out dump, cret_code=" << cret_code;
+        }
+        LOG(INFO) << "out child process, pid=" << pid << "; cret_code=" << cret_code;
+        exit(cret_code);
+    } else {
+        LOG(INFO) << "in parent process, waitting.";
+        wait(&child_status);
+        ret_code = (ret_code_t)child_status;
+        LOG(INFO) << "out parent process, ret_code=" << ret_code << "; child_status" << child_status;
+    }
+
+    return ret_code;
+}
+
 
 index_stats_t vqindex_stats(void* vql_handler)
 {

@@ -221,7 +221,7 @@ Status ScannInterface::Initialize(shared_ptr<DenseDataset<float>> dataset,
     else
       min_batch_size_ = 256;
   }
-  parallel_query_pool_ = StartThreadPool("ScannQueryingPool", GetNumCPUs() - 1);
+  //parallel_query_pool_ = StartThreadPool("ScannQueryingPool", GetNumCPUs() - 1);
   return OkStatus();
 }
 
@@ -323,6 +323,10 @@ Status ScannInterface::SearchBatchedParallel(const DenseDataset<float>& queries,
                                              int leaves) const {
   const size_t numQueries = queries.size();
   const size_t numCPUs = GetNumCPUs();
+
+  if (parallel_query_pool_ == nullptr) {
+    return InvalidArgumentError("parallel_query_pool_ is nullptr");
+  }
 
   const size_t kBatchSize = std::min(
       std::max(min_batch_size_, DivRoundUp(numQueries, numCPUs)), 256ul);
