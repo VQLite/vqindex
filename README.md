@@ -14,6 +14,12 @@ Override the downloaded version with `BAZEL_DOWNLOAD_VERSION` when needed.
 `vqindex_py` also needs Python headers from the Python selected by
 `PYTHON_BIN_PATH` or `python3`.
 
+By default `build.sh` optimizes for the current machine with `-march=native`
+or `-mcpu=native`, enables Highway multi-target dispatch, and turns on CPU
+features it detects such as SSE4, AVX2, FMA, AVX512/VNNI/BF16/FP16, or ARM
+NEON. Use `VQINDEX_CPU_OPT=portable` for a more portable baseline, and
+`VQINDEX_HWY_TARGETS=static` to avoid compiling all attainable Highway targets.
+
 ## Build vqindex py
 centos need "-lstdc++fs"
 ```
