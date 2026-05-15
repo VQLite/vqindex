@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,7 +16,10 @@
 
 #include "scann/trees/kmeans_tree/training_options.h"
 
+#include "absl/log/log.h"
+#include "absl/time/time.h"
 #include "scann/proto/partitioning.pb.h"
+#include "scann/utils/common.h"
 #include "scann/utils/gmm_utils.h"
 
 namespace research_scann {
@@ -34,15 +37,16 @@ KMeansTreeTrainingOptions::KMeansTreeTrainingOptions(
       max_iterations(config.max_clustering_iterations()),
       convergence_epsilon(config.clustering_convergence_tolerance()),
       min_cluster_size(config.min_cluster_size()),
-      seed(config.clustering_seed()),
-      compute_residual_stdev(config.compute_residual_stdev()),
-      residual_stdev_min_value(config.residual_stdev_min_value()) {
+      seed(config.clustering_seed()) {
   switch (config.balancing_type()) {
     case PartitioningConfig::DEFAULT_UNBALANCED:
       balancing_type = GmmUtils::Options::UNBALANCED;
       break;
     case PartitioningConfig::GREEDY_BALANCED:
       balancing_type = GmmUtils::Options::GREEDY_BALANCED;
+      break;
+    case PartitioningConfig::UNBALANCED_FLOAT32:
+      balancing_type = GmmUtils::Options::UNBALANCED_FLOAT32;
       break;
   }
   switch (config.trainer_type()) {

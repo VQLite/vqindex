@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,18 +17,32 @@
 #ifndef SCANN_PARTITIONING_KMEANS_TREE_PARTITIONER_H_
 #define SCANN_PARTITIONING_KMEANS_TREE_PARTITIONER_H_
 
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <vector>
 
+#include "absl/base/thread_annotations.h"
 #include "absl/synchronization/mutex.h"
 #include "scann/base/single_machine_base.h"
+#include "scann/data_format/datapoint.h"
+#include "scann/data_format/dataset.h"
+#include "scann/distance_measures/distance_measure_base.h"
+#include "scann/distance_measures/many_to_many/many_to_many.h"
+#include "scann/distance_measures/one_to_one/dot_product.h"
+#include "scann/distance_measures/one_to_one/l2_distance.h"
+#include "scann/oss_wrappers/scann_status.h"
+#include "scann/oss_wrappers/scann_threadpool.h"
 #include "scann/partitioning/kmeans_tree_like_partitioner.h"
+#include "scann/partitioning/orthogonality_amplification_utils.h"
 #include "scann/partitioning/partitioner.pb.h"
 #include "scann/partitioning/partitioner_base.h"
+#include "scann/proto/partitioning.pb.h"
 #include "scann/trees/kmeans_tree/kmeans_tree.h"
 #include "scann/trees/kmeans_tree/kmeans_tree_node.h"
 #include "scann/trees/kmeans_tree/training_options.h"
+#include "scann/utils/common.h"
 #include "scann/utils/types.h"
 
 namespace research_scann {
@@ -49,6 +63,9 @@ class KMeansTreePartitioner final : public KMeansTreeLikePartitioner<T> {
       shared_ptr<const DistanceMeasure> database_tokenization_dist,
       shared_ptr<const DistanceMeasure> query_tokenization_dist,
       shared_ptr<const KMeansTree> pretrained_tree);
+
+  KMeansTreePartitioner(const KMeansTreePartitioner&) = delete;
+  KMeansTreePartitioner& operator=(const KMeansTreePartitioner&) = delete;
 
   unique_ptr<Partitioner<T>> Clone() const override;
 
@@ -73,13 +90,26 @@ class KMeansTreePartitioner final : public KMeansTreeLikePartitioner<T> {
     database_spilling_fixed_number_of_centers_ = val;
   }
 
-  QuerySpillingConfig::SpillingType query_spilling_type() const {
+  void set_orthogonality_amplification_lambda(float val) {
+    orthogonality_amplification_lambda_ = val;
+  }
+  float orthogonality_amplification_lambda() const {
+    return orthogonality_amplification_lambda_;
+  }
+
+  bool orthogonality_amplified_database_spilling() const {
+    return orthogonality_amplification_lambda_ != 0.0f;
+  }
+
+  QuerySpillingConfig::SpillingType query_spilling_type() const override {
     return query_spilling_type_;
   }
 
-  double query_spilling_threshold() const { return query_spilling_threshold_; }
+  double query_spilling_threshold() const override {
+    return query_spilling_threshold_;
+  }
 
-  uint32_t query_spilling_max_centers() const {
+  uint32_t query_spilling_max_centers() const override {
     return query_spilling_max_centers_;
   }
 
@@ -88,6 +118,7 @@ class KMeansTreePartitioner final : public KMeansTreeLikePartitioner<T> {
   }
 
   enum TokenizationType {
+
     FLOAT = 1,
 
     FIXED_POINT_INT8 = 2,
@@ -101,6 +132,10 @@ class KMeansTreePartitioner final : public KMeansTreeLikePartitioner<T> {
 
   void SetDatabaseTokenizationType(TokenizationType type) {
     database_tokenization_type_ = type;
+  }
+
+  void SetNumTokenizedBranch(int32_t num_tokenized_branch) {
+    num_tokenized_branch_ = num_tokenized_branch;
   }
 
   Status TokenForDatapoint(const DatapointPtr<T>& dptr,
@@ -119,50 +154,62 @@ class KMeansTreePartitioner final : public KMeansTreeLikePartitioner<T> {
       std::vector<int32_t>* result) const;
 
   Status TokenForDatapoint(const DatapointPtr<T>& dptr,
-                           KMeansTreeSearchResult* result) const final;
+                           pair<DatapointIndex, float>* result) const final;
+
+  using KMeansTreeLikePartitioner<T>::TokenForDatapointBatched;
   Status TokenForDatapointBatched(
       const TypedDataset<T>& queries,
-      std::vector<KMeansTreeSearchResult>* result) const final;
+      std::vector<pair<DatapointIndex, float>>* result,
+      ThreadPool* pool) const final;
+
   Status TokensForDatapointWithSpilling(
       const DatapointPtr<T>& dptr, int32_t max_centers_override,
-      std::vector<KMeansTreeSearchResult>* result) const final;
+      std::vector<pair<DatapointIndex, float>>* result) const final;
 
   Status TokensForDatapointWithSpillingBatched(
-      const TypedDataset<T>& queries,
-      MutableSpan<std::vector<int32_t>> results) const final {
+      const TypedDataset<T>& queries, MutableSpan<std::vector<int32_t>> results,
+      ThreadPool* pool = nullptr) const final {
     return TokensForDatapointWithSpillingBatchedAndOverride(
-        queries, vector<int32_t>(), results);
+        queries, vector<int32_t>(), results, pool);
   }
   Status TokensForDatapointWithSpillingBatchedAndOverride(
       const TypedDataset<T>& queries, ConstSpan<int32_t> max_centers_override,
-      MutableSpan<std::vector<int32_t>> results) const;
+      MutableSpan<std::vector<int32_t>> results,
+      ThreadPool* pool = nullptr) const;
+
   Status TokensForDatapointWithSpillingBatched(
       const TypedDataset<T>& queries, ConstSpan<int32_t> max_centers_override,
-      MutableSpan<std::vector<KMeansTreeSearchResult>> results) const final;
+      MutableSpan<vector<pair<DatapointIndex, float>>> results,
+      ThreadPool* pool = nullptr) const final;
 
   StatusOr<vector<std::vector<DatapointIndex>>> TokenizeDatabase(
-      const TypedDataset<T>& database, ThreadPool* pool_or_null) const override;
+      const TypedDataset<T>& database, ThreadPool* pool_or_null) const final;
 
-  StatusOr<Datapoint<float>> ResidualizeToFloat(
-      const DatapointPtr<T>& dptr, int32_t token,
-      bool normalize_residual_by_cluster_stdev) const final;
+  struct AvqOptions {
+    bool avq_after_primary = false;
 
-  StatusOr<double> ResidualStdevForToken(int32_t token) const override {
-    return kmeans_tree()->ResidualStdevForToken(token);
-  }
+    float avq_eta = NAN;
 
-  const DenseDataset<float>& LeafCenters() const;
+    bool skip_secondary_tokenization = false;
+  };
+  StatusOr<vector<std::vector<DatapointIndex>>> TokenizeDatabase(
+      const TypedDataset<T>& database, ThreadPool* pool_or_null,
+      AvqOptions avq_opts);
+
+  StatusOr<Datapoint<float>> ResidualizeToFloat(const DatapointPtr<T>& dptr,
+                                                int32_t token) const final;
+
+  const DenseDataset<float>& LeafCenters() const final;
+
+  Status ApplyAvq(const DenseDataset<T>& dataset,
+                  ConstSpan<std::vector<DatapointIndex>> datapoints_by_token,
+                  float avq_eta, ThreadPool* pool_or_null = nullptr);
 
   void CopyToProto(SerializedPartitioner* result) const final;
 
   int32_t n_tokens() const final;
 
   Normalization NormalizationRequired() const final;
-
-  const shared_ptr<const DistanceMeasure>& database_tokenization_distance()
-      const final {
-    return database_tokenization_dist_;
-  }
 
   const shared_ptr<const DistanceMeasure>& query_tokenization_distance()
       const final {
@@ -180,11 +227,8 @@ class KMeansTreePartitioner final : public KMeansTreeLikePartitioner<T> {
     return kmeans_tree_;
   }
 
-  bool populate_residual_stdev() const { return populate_residual_stdev_; }
-  void set_populate_residual_stdev(bool val) { populate_residual_stdev_ = val; }
-
   bool SupportsLowLevelQueryBatching() const {
-    return query_tokenization_type_ == FLOAT && is_one_level_tree_ &&
+    return query_tokenization_type_ == FLOAT && kmeans_tree_->is_flat() &&
            ((typeid(*query_tokenization_dist_) ==
                  typeid(const DotProductDistance) ||
              typeid(*query_tokenization_dist_) ==
@@ -193,34 +237,21 @@ class KMeansTreePartitioner final : public KMeansTreeLikePartitioner<T> {
 
  private:
   Status TokenForDatapointUseSearcher(
-      const DatapointPtr<T>& dptr, KMeansTreeSearchResult* result,
+      const DatapointPtr<T>& dptr, pair<DatapointIndex, float>* result,
       int32_t pre_reordering_num_neighbors) const;
   Status TokensForDatapointWithSpillingUseSearcher(
-      const DatapointPtr<T>& dptr, std::vector<KMeansTreeSearchResult>* result,
-      int32_t num_neighbors, int32_t pre_reordering_num_neighbors) const;
+      const DatapointPtr<T>& dptr,
+      std::vector<pair<DatapointIndex, float>>* result, int32_t num_neighbors,
+      int32_t pre_reordering_num_neighbors) const;
 
-  void SetIsOneLevelTree();
-
-  StatusOr<std::vector<KMeansTreeSearchResult>> TokenizeDatabaseImplFastPath(
-      const DenseDataset<T>& database, ThreadPool* pool_or_null) const;
-
-  template <typename CenterType>
-  enable_if_t<!IsSame<T, CenterType>(),
-              StatusOr<std::vector<KMeansTreeSearchResult>>>
+  StatusOr<std::vector<pair<DatapointIndex, float>>>
   TokenizeDatabaseImplFastPath(const DenseDataset<T>& database,
-                               const DenseDataset<CenterType>& centers,
                                ThreadPool* pool_or_null) const;
 
-  template <typename CenterType>
-  enable_if_t<IsSame<T, CenterType>(),
-              StatusOr<std::vector<KMeansTreeSearchResult>>>
+  StatusOr<std::vector<pair<DatapointIndex, float>>>
   TokenizeDatabaseImplFastPath(const DenseDataset<T>& database,
-                               const DenseDataset<CenterType>& centers,
+                               const DenseDataset<float>& centers,
                                ThreadPool* pool_or_null) const;
-
-  template <typename FloatT>
-  std::vector<KMeansTreeSearchResult> PostprocessNearestCenters(
-      ConstSpan<pair<DatapointIndex, FloatT>> nearest_centers) const;
 
   const DenseDataset<float>* ConvertToFloatIfNecessary(
       const DenseDataset<T>& dataset, DenseDataset<float>* storage) const {
@@ -243,15 +274,16 @@ class KMeansTreePartitioner final : public KMeansTreeLikePartitioner<T> {
   StatusOr<vector<pair<DatapointIndex, float>>> TokenForDatapointBatchedImpl(
       const TypedDataset<T>& queries, ThreadPool* pool = nullptr) const;
 
-  vector<KMeansTreeSearchResult> ToKmeansTreeSearchResults(
-      ConstSpan<pair<DatapointIndex, float>> partitions) const;
+  Status OrthogonalityAmplifiedTokenForDatapointBatched(
+      const DenseDataset<T>& queries,
+      ConstSpan<pair<DatapointIndex, float>> primary_centroids,
+      MutableSpan<pair<DatapointIndex, float>> secondary_centroids,
+      ThreadPool* pool = nullptr) const;
 
   shared_ptr<const KMeansTree> kmeans_tree_;
 
   shared_ptr<const DistanceMeasure> database_tokenization_dist_;
   shared_ptr<const DistanceMeasure> query_tokenization_dist_;
-
-  std::vector<float> center_squared_norms_ = {};
 
   mutable absl::Mutex leaf_centers_mutex_;
   mutable DenseDataset<float> leaf_centers_
@@ -266,24 +298,28 @@ class KMeansTreePartitioner final : public KMeansTreeLikePartitioner<T> {
 
   int32_t database_spilling_fixed_number_of_centers_ = 0;
 
+  float orthogonality_amplification_lambda_ = 0.0f;
+
   bool ready_to_tokenize_ = false;
 
   TokenizationType query_tokenization_type_ = FLOAT;
 
   TokenizationType database_tokenization_type_ = FLOAT;
 
-  bool is_one_level_tree_ = false;
-
-  bool populate_residual_stdev_ = false;
+  int num_tokenized_branch_ = 1;
 
   shared_ptr<const SingleMachineSearcherBase<float>>
       database_tokenization_searcher_ = nullptr;
 
   shared_ptr<const SingleMachineSearcherBase<float>>
       query_tokenization_searcher_ = nullptr;
-
-  TF_DISALLOW_COPY_AND_ASSIGN(KMeansTreePartitioner);
 };
+
+template <>
+StatusOr<vector<pair<DatapointIndex, float>>>
+KMeansTreePartitioner<float>::TokenizeDatabaseImplFastPath(
+    const DenseDataset<float>& database, const DenseDataset<float>& centers,
+    ThreadPool* pool_or_null) const;
 
 SCANN_INSTANTIATE_TYPED_CLASS(extern, KMeansTreePartitioner);
 

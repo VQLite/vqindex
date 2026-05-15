@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -78,7 +79,10 @@ class ChunkedDatapoint {
   friend class ChunkingProjection;
 };
 
-class ChunkingProjectionUntyped : public VirtualDestructor {};
+class ChunkingProjectionUntyped : public VirtualDestructor {
+ public:
+  virtual std::optional<SerializedProjection> SerializeToProto() const = 0;
+};
 
 template <typename T>
 class ChunkingProjection : public ChunkingProjectionUntyped {
@@ -122,6 +126,10 @@ class ChunkingProjection : public ChunkingProjectionUntyped {
                       vector<Datapoint<double>>* chunked) const {
     return BackcompatImpl<double>(input, chunked);
   }
+
+  std::optional<SerializedProjection> SerializeToProto() const override;
+
+  Projection<T>* initial_projector() const { return initial_projection_.get(); }
 
  private:
   template <typename FloatT>

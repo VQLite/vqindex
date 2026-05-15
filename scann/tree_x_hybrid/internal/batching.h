@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -42,13 +42,11 @@ bool SupportsLowLevelBatching(const TypedDataset<T>& queries,
 template <typename Mutator>
 void AddLeafResultsToTopN(ConstSpan<DatapointIndex> local_to_global_index,
                           const float distance_to_center_adjustment,
-                          const float cluster_stdev_adjustment,
                           ConstSpan<pair<DatapointIndex, float>> leaf_results,
                           Mutator* mutator) {
   float epsilon = mutator->epsilon();
   for (const auto& result : leaf_results) {
-    float dist = result.second * cluster_stdev_adjustment +
-                 distance_to_center_adjustment;
+    float dist = result.second + distance_to_center_adjustment;
     if (dist <= epsilon) {
       if (ABSL_PREDICT_FALSE(
               mutator->Push(local_to_global_index[result.first], dist))) {
@@ -73,6 +71,20 @@ inline DatapointIndex QueryIndex(const QueryForResidualLeaf& q) {
   return q.query_index;
 }
 
+struct BatchedGlobalTopNData {
+  BatchedGlobalTopNData(uint32_t leaf_index, uint32_t leaf_size,
+                        const uint8_t* ah_data,
+                        ConstSpan<QueryForResidualLeaf> queries)
+      : leaf_index(leaf_index),
+        leaf_size(leaf_size),
+        ah_data(ah_data),
+        queries(queries) {}
+  uint32_t leaf_index;
+  uint32_t leaf_size;
+  const uint8_t* ah_data;
+  ConstSpan<QueryForResidualLeaf> queries;
+};
+
 inline float DistanceToCenterAdjustment(DatapointIndex query_index) {
   return 0.0f;
 }
@@ -83,8 +95,7 @@ inline float DistanceToCenterAdjustment(const QueryForResidualLeaf& q) {
 
 template <typename QueryForLeaf>
 vector<SearchParameters> CreateParamsSubsetForLeaf(
-    ConstSpan<SearchParameters> params,
-    ConstSpan<FastTopNeighbors<float>::Mutator> mutators,
+    ConstSpan<FastTopNeighbors<float>> topns,
     ConstSpan<shared_ptr<const SearcherSpecificOptionalParameters>>
         leaf_optional_params,
     ConstSpan<QueryForLeaf> queries_for_leaf) {
@@ -94,8 +105,8 @@ vector<SearchParameters> CreateParamsSubsetForLeaf(
     const DatapointIndex query_index = QueryIndex(q);
     SearchParameters leaf_params;
     leaf_params.set_pre_reordering_num_neighbors(
-        params[query_index].pre_reordering_num_neighbors());
-    leaf_params.set_pre_reordering_epsilon(mutators[query_index].epsilon() -
+        topns[query_index].max_results());
+    leaf_params.set_pre_reordering_epsilon(topns[query_index].epsilon() -
                                            DistanceToCenterAdjustment(q));
     leaf_params.set_searcher_specific_optional_parameters(
         leaf_optional_params[query_index]);

@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,27 +28,40 @@
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
+#include "scann/data_format/datapoint.h"
 #include "scann/data_format/dataset.h"
+#include "scann/distance_measures/distance_measure_base.h"
 #include "scann/distance_measures/one_to_one/l2_distance.h"
+#include "scann/oss_wrappers/scann_castops.h"
 #include "scann/oss_wrappers/scann_random.h"
 #include "scann/proto/partitioning.pb.h"
+#include "scann/trees/kmeans_tree/kmeans_tree.pb.h"
+#include "scann/trees/kmeans_tree/training_options.h"
+#include "scann/utils/common.h"
+#include "scann/utils/fast_top_neighbors.h"
 #include "scann/utils/gmm_utils.h"
-#include "scann/utils/parallel_for.h"
 #include "scann/utils/scalar_quantization_helpers.h"
 #include "scann/utils/types.h"
 #include "scann/utils/util_functions.h"
-#include "tensorflow/core/platform/cpu_info.h"
 
 namespace research_scann {
 
-KMeansTreeNode::KMeansTreeNode() {}
+KMeansTreeNode::KMeansTreeNode() = default;
+
+KMeansTreeNode KMeansTreeNode::CreateFlat(DenseDataset<float> centers) {
+  KMeansTreeNode root;
+  root.float_centers_ = std::move(centers);
+  root.children_ = vector<KMeansTreeNode>(root.float_centers_.size());
+  root.NumberLeaves(0);
+  root.MaybeInitializeThreadSharding();
+  return root;
+}
 
 void KMeansTreeNode::Reset() {
   leaf_id_ = -1;
   learned_spilling_threshold_ = numeric_limits<double>::quiet_NaN();
   indices_.clear();
   children_.clear();
-  residual_stdevs_.clear();
 }
 
 void KMeansTreeNode::UnionIndices(vector<DatapointIndex>* result) const {
@@ -99,10 +112,6 @@ void KMeansTreeNode::BuildFromProto(const SerializedKMeansTree::Node& proto) {
 
   indices_.clear();
   children_.clear();
-  residual_stdevs_.clear();
-  residual_stdevs_.insert(residual_stdevs_.begin(),
-                          proto.residual_stdevs().begin(),
-                          proto.residual_stdevs().end());
   if (proto.children_size() == 0) {
     indices_.insert(indices_.begin(), proto.indices().begin(),
                     proto.indices().end());
@@ -119,6 +128,7 @@ namespace kmeans_tree_internal {
 Status PostprocessDistancesForSpilling(
     ConstSpan<float> distances, QuerySpillingConfig::SpillingType spilling_type,
     double spilling_threshold, int32_t max_centers,
+    int32_t num_tokenized_branch,
     std::vector<pair<DatapointIndex, float>>* child_centers) {
   float epsilon = std::numeric_limits<float>::infinity();
   if (spilling_type != QuerySpillingConfig::NO_SPILLING &&
@@ -132,14 +142,16 @@ Status PostprocessDistancesForSpilling(
 
     float spill_thresh = std::nextafter(DoubleToFloat(spilling_threshold),
                                         std::numeric_limits<float>::infinity());
-    TF_ASSIGN_OR_RETURN(
+    SCANN_ASSIGN_OR_RETURN(
         float max_dist_to_consider,
         ComputeThreshold(nearest_center_distance, spill_thresh, spilling_type));
     epsilon = std::nextafter(max_dist_to_consider,
                              std::numeric_limits<float>::infinity());
   }
   const int32_t max_results =
-      (spilling_type == QuerySpillingConfig::NO_SPILLING) ? 1 : max_centers;
+      (spilling_type == QuerySpillingConfig::NO_SPILLING)
+          ? std::max(1, num_tokenized_branch)
+          : max_centers;
   FastTopNeighbors<float> top_n(max_results, epsilon);
   top_n.PushBlock(distances, 0);
   top_n.FinishUnsorted(child_centers);
@@ -180,13 +192,14 @@ Status KMeansTreeNode::Train(const Dataset& training_data,
       training_data, k_per_level, &centers,
       {.subset = indices_,
        .final_partitions = &subpartitions,
-       .spherical = opts->partitioning_type == PartitioningConfig::SPHERICAL}));
+       .spherical = opts->partitioning_type == PartitioningConfig::SPHERICAL,
+       .first_n_centroids = opts->first_n_centroids}));
 
   DatabaseSpillingConfig::SpillingType spilling_type =
       opts->learned_spilling_type;
   if (spilling_type != DatabaseSpillingConfig::NO_SPILLING &&
       opts->per_node_spilling_factor > 1.0) {
-    TF_ASSIGN_OR_RETURN(
+    SCANN_ASSIGN_OR_RETURN(
         learned_spilling_threshold_,
         gmm.ComputeSpillingThreshold(
             training_data, indices_, centers, opts->learned_spilling_type,
@@ -211,7 +224,7 @@ Status KMeansTreeNode::Train(const Dataset& training_data,
             kmeans_tree_internal::PostprocessDistancesForSpilling(
                 tmp_dists,
                 static_cast<QuerySpillingConfig::SpillingType>(spilling_type),
-                learned_spilling_threshold_, opts->max_spill_centers,
+                learned_spilling_threshold_, opts->max_spill_centers, -1,
                 &spill_centers));
       }
 
@@ -234,30 +247,6 @@ Status KMeansTreeNode::Train(const Dataset& training_data,
     if (!std::isnan(learned_spilling_threshold_)) {
       subpartitions.swap(spilled);
     }
-  }
-
-  if (opts->compute_residual_stdev) {
-    residual_stdevs_.resize(centers.size());
-    ParallelFor<1>(Seq(centers.size()),
-                   opts->training_parallelization_pool.get(), [&](size_t i) {
-                     double sq_residual_sum = 0.0;
-                     uint32_t count = subpartitions[i].size();
-                     DatapointPtr<double> center = centers.at(i);
-                     for (auto j : subpartitions[i]) {
-                       Datapoint<double> double_dp;
-                       training_data.GetDatapoint(j, &double_dp);
-                       sq_residual_sum +=
-                           SquaredL2DistanceBetween(double_dp.ToPtr(), center);
-                     }
-
-                     residual_stdevs_[i] = std::max(
-                         count == 0
-                             ? 1.0
-                             : count == 1
-                                   ? std::sqrt(sq_residual_sum)
-                                   : std::sqrt(sq_residual_sum / (count - 1)),
-                         opts->residual_stdev_min_value);
-                   });
   }
 
   FreeBackingStorage(&indices_);
@@ -333,17 +322,13 @@ void KMeansTreeNode::CopyToProto(SerializedKMeansTree::Node* proto,
     const DatapointPtr<float> center = float_centers_[i];
     DCHECK(center.IsDense());
     auto center_proto = proto->add_centers();
-    for (const float& elem : center.values_slice()) {
+    for (const float& elem : center.values_span()) {
       center_proto->add_dimension(elem);
     }
   }
 
   proto->set_leaf_id(leaf_id_);
   proto->set_learned_spilling_threshold(learned_spilling_threshold_);
-
-  for (const double& residual_stdev : residual_stdevs_) {
-    proto->add_residual_stdevs(residual_stdev);
-  }
 
   if (IsLeaf() && with_indices) {
     for (const auto& index : indices_) {

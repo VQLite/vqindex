@@ -1,0 +1,5 @@
+.tools/
+__pycache__/
+bazel-*
+libs/
+test/vqindex_py.so

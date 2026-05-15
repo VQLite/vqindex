@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,6 +22,11 @@ StatusOr<shared_ptr<const TypedDataset<float>>>
 UntypedProjection::GetDirections() const {
   return UnimplementedError(
       "GetDirections does not exist for this projection type.");
+}
+
+std::optional<SerializedProjection> UntypedProjection::SerializeToProto()
+    const {
+  return std::nullopt;
 }
 
 SCANN_INSTANTIATE_TYPED_CLASS(, Projection);

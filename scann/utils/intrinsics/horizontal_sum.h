@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,8 @@
 #ifndef SCANN_UTILS_INTRINSICS_HORIZONTAL_SUM_H_
 #define SCANN_UTILS_INTRINSICS_HORIZONTAL_SUM_H_
 
+#include "hwy/highway.h"
+#include "scann/utils/intrinsics/highway.h"
 #include "scann/utils/intrinsics/simd.h"
 
 namespace research_scann {
@@ -43,6 +45,39 @@ SCANN_INLINE void HorizontalSum4X(Simd<FloatT> a, Simd<FloatT> b,
 
 }  // namespace fallback
 
+#if HWY_HAVE_CONSTEXPR_LANES
+HWY_BEFORE_NAMESPACE();
+namespace highway {
+
+namespace hn = hwy::HWY_NAMESPACE;
+
+template <typename FloatT>
+SCANN_INLINE FloatT HorizontalSum(Highway<FloatT> a) {
+  return hn::ReduceSum(hn::ScalableTag<FloatT>(), *a);
+}
+
+template <typename FloatT>
+SCANN_INLINE void HorizontalSum2X(Highway<FloatT> a, Highway<FloatT> b,
+                                  FloatT* resulta, FloatT* resultb) {
+  *resulta = HorizontalSum(a);
+  *resultb = HorizontalSum(b);
+}
+
+template <typename FloatT>
+SCANN_INLINE void HorizontalSum4X(Highway<FloatT> a, Highway<FloatT> b,
+                                  Highway<FloatT> c, Highway<FloatT> d,
+                                  FloatT* resulta, FloatT* resultb,
+                                  FloatT* resultc, FloatT* resultd) {
+  *resulta = HorizontalSum(a);
+  *resultb = HorizontalSum(b);
+  *resultc = HorizontalSum(c);
+  *resultd = HorizontalSum(d);
+}
+
+}  // namespace highway
+HWY_AFTER_NAMESPACE();
+#endif
+
 #ifdef __x86_64__
 
 namespace sse4 {
@@ -66,6 +101,15 @@ SCANN_INLINE void HorizontalSum2X(Sse4<FloatT> a, Sse4<FloatT> b,
                                   FloatT* resulta, FloatT* resultb) {
   *resulta = HorizontalSum(a);
   *resultb = HorizontalSum(b);
+}
+
+template <typename FloatT>
+SCANN_INLINE void HorizontalSum3X(Sse4<FloatT> a, Sse4<FloatT> b,
+                                  Sse4<FloatT> c, FloatT* resulta,
+                                  FloatT* resultb, FloatT* resultc) {
+  *resulta = HorizontalSum(a);
+  *resultb = HorizontalSum(b);
+  *resultc = HorizontalSum(c);
 }
 
 template <typename FloatT>
@@ -209,6 +253,14 @@ SCANN_AVX512_INLINE void HorizontalSum2X(Avx512<double> a, Avx512<double> b,
                                          double* resulta, double* resultb) {
   *resulta = _mm512_reduce_add_pd(*a);
   *resultb = _mm512_reduce_add_pd(*b);
+}
+
+SCANN_AVX512_INLINE void HorizontalSum3X(Avx512<float> a, Avx512<float> b,
+                                         Avx512<float> c, float* resulta,
+                                         float* resultb, float* resultc) {
+  *resulta = _mm512_reduce_add_ps(*a);
+  *resultb = _mm512_reduce_add_ps(*b);
+  *resultc = _mm512_reduce_add_ps(*c);
 }
 
 SCANN_AVX512_INLINE void HorizontalSum4X(Avx512<float> a, Avx512<float> b,

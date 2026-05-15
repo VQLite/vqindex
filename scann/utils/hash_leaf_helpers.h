@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,9 +19,15 @@
 #include <memory>
 
 #include "scann/base/single_machine_base.h"
+#include "scann/data_format/dataset.h"
 #include "scann/hashes/asymmetric_hashing2/indexing.h"
 #include "scann/hashes/asymmetric_hashing2/querying.h"
+#include "scann/hashes/asymmetric_hashing2/training_model.h"
+#include "scann/oss_wrappers/scann_threadpool.h"
 #include "scann/proto/centers.pb.h"
+#include "scann/proto/hash.pb.h"
+#include "scann/proto/scann.pb.h"
+#include "scann/utils/common.h"
 #include "scann/utils/factory_helpers.h"
 #include "scann/utils/types.h"
 
@@ -60,6 +66,12 @@ struct HashLeafHelpers {
       const AsymmetricHasherConfig& config,
       const GenericSearchParameters& params, shared_ptr<ThreadPool> pool,
       CentersForAllSubspaces* preloaded_codebook = nullptr);
+
+  static StatusOr<TrainedAsymmetricHashingResults<T>>
+  LoadAsymmetricHashingModel(
+      const AsymmetricHasherConfig& config,
+      const GenericSearchParameters& params,
+      shared_ptr<const asymmetric_hashing2::Model<T>> model);
 };
 
 SCANN_INSTANTIATE_TYPED_CLASS(extern, TrainedAsymmetricHashingResults);

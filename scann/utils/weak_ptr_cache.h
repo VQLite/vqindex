@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -40,8 +40,8 @@ StatusOr<shared_ptr<const Output>> WeakPtrCache(
   auto it = cache.find(fp);
 
   auto create_new_output = [&]() -> StatusOr<shared_ptr<const Output>> {
-    TF_ASSIGN_OR_RETURN(shared_ptr<const Output> output,
-                        base_factory(inputs...));
+    SCANN_ASSIGN_OR_RETURN(shared_ptr<const Output> output,
+                           base_factory(inputs...));
     cache[fp] = output;
     return output;
   };

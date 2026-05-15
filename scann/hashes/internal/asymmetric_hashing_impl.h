@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,6 +22,8 @@
 #include <utility>
 #include <vector>
 
+#include "absl/base/optimization.h"
+#include "absl/base/prefetch.h"
 #include "scann/base/restrict_allowlist.h"
 #include "scann/data_format/datapoint.h"
 #include "scann/data_format/dataset.h"
@@ -32,7 +34,6 @@
 #include "scann/utils/datapoint_utils.h"
 #include "scann/utils/top_n_amortized_constant.h"
 #include "scann/utils/types.h"
-#include "tensorflow/core/platform/prefetch.h"
 
 namespace research_scann {
 namespace asymmetric_hashing_internal {
@@ -42,10 +43,10 @@ StatusOr<double> ComputeNormBiasCorrection(
     const DenseDataset<FloatT>& db, DatapointPtr<double> center,
     ConstSpan<DatapointIndex> cluster_members) {
   if (cluster_members.empty()) return 1.0;
-  SCANN_RETURN_IF_ERROR(VerifyAllFinite(center.values_slice()));
+  SCANN_RETURN_IF_ERROR(VerifyAllFinite(center.values_span()));
   double mean_norm = 0.0;
   for (DatapointIndex idx : cluster_members) {
-    SCANN_RETURN_IF_ERROR(VerifyAllFinite(db[idx].values_slice()));
+    SCANN_RETURN_IF_ERROR(VerifyAllFinite(db[idx].values_span()));
     mean_norm += std::sqrt(SquaredL2Norm(db[idx]));
   }
   SCANN_RET_CHECK(std::isfinite(mean_norm)) << mean_norm;
@@ -105,7 +106,9 @@ struct AhImpl {
   static StatusOr<std::vector<float>> CreateRawFloatLookupTable(
       const DatapointPtr<T>& query, const ChunkingProjection<T>& projection,
       const DistanceMeasure& lookup_distance,
-      ConstSpan<DenseDataset<FloatT>> centers, int32_t num_clusters_per_block);
+      ConstSpan<DenseDataset<FloatT>> centers,
+      ConstSpan<FloatT> block_transposed_centers,
+      int32_t num_clusters_per_block);
 };
 
 SCANN_INSTANTIATE_TYPED_CLASS(extern, AhImpl);
@@ -143,9 +146,11 @@ StatusOr<std::vector<float>> CreateRawFloatLookupTable(
     const DatapointPtr<T>& query, const ChunkingProjection<T>& projection,
     const DistanceMeasure& lookup_distance,
     ConstSpan<DenseDataset<FloatingTypeFor<T>>> centers,
+    ConstSpan<FloatingTypeFor<T>> block_transposed_centers,
     int32_t num_clusters_per_block) {
   return AhImpl<T>::CreateRawFloatLookupTable(
-      query, projection, lookup_distance, centers, num_clusters_per_block);
+      query, projection, lookup_distance, centers, block_transposed_centers,
+      num_clusters_per_block);
 }
 
 template <typename Uint>
@@ -348,9 +353,9 @@ template <typename T>
 using make_unsigned_if_int_t = typename make_unsigned_if_int_struct<T>::type;
 
 template <typename DatasetView, typename LookupElement,
-          size_t kCompileTimeNumCenters, typename IndexIterator>
-ABSL_ATTRIBUTE_NOINLINE void
-GetNeighborsViaAsymmetricDistanceWithCompileTimeNumCenters(
+          size_t kCompileTimeNumCenters, typename IndexIterator, bool kPrefetch>
+SCANN_OUTLINE void
+GetNeighborsViaAsymmetricDistanceWithCompileTimeNumCentersImpl(
     ConstSpan<LookupElement> lookup, size_t runtime_num_centers,
     const DatasetView* __restrict__ hashed_database, IndexIterator it) {
   using Dist = typename DistanceType<LookupElement>::type;
@@ -373,7 +378,24 @@ GetNeighborsViaAsymmetricDistanceWithCompileTimeNumCenters(
 
   DCHECK_GT(num_blocks, 0);
 
+  constexpr size_t kCacheLineSize = 64;
+  const size_t num_cache_lines_per_dp =
+      kPrefetch ? DivRoundUp(num_blocks, kCacheLineSize) : 0;
+
   for (; it.FullUnrollLeft(); it.Advance()) {
+    if constexpr (kPrefetch) {
+      const size_t num_prefetch =
+          std::min(it.kUnrollFactor, it.num_left() - it.kUnrollFactor);
+      for (size_t prefetch_idx : Seq(num_prefetch)) {
+        const size_t offset =
+            it.GetOffsetIndex(prefetch_idx + it.kUnrollFactor);
+        const uint8_t* hashed_database_point = hashed_database->GetPtr(offset);
+        for (size_t cache_line_idx : Seq(num_cache_lines_per_dp)) {
+          absl::PrefetchToLocalCache(hashed_database_point +
+                                     cache_line_idx * kCacheLineSize);
+        }
+      }
+    }
     const uint8_t* hashed_database_point0 =
         hashed_database->GetPtr(it.GetOffsetIndex(0));
     const uint8_t* hashed_database_point1 =
@@ -445,14 +467,31 @@ GetNeighborsViaAsymmetricDistanceWithCompileTimeNumCenters(
   }
 }
 
+template <typename DatasetView, typename LookupElement, typename IndexIterator,
+          bool kPrefetch = false>
+SCANN_INLINE void GetNeighborsViaAsymmetricDistanceWithCompileTimeNumCenters(
+    ConstSpan<LookupElement> lookup, size_t runtime_num_centers,
+    const DatasetView* __restrict__ hashed_database, IndexIterator it) {
+  if constexpr (std::is_same_v<LookupElement, uint8_t>) {
+    if (ABSL_PREDICT_TRUE(runtime_num_centers == 256)) {
+      return GetNeighborsViaAsymmetricDistanceWithCompileTimeNumCentersImpl<
+          DatasetView, LookupElement, 256, IndexIterator, kPrefetch>(
+          lookup, runtime_num_centers, hashed_database, it);
+    }
+  }
+  return GetNeighborsViaAsymmetricDistanceWithCompileTimeNumCentersImpl<
+      DatasetView, LookupElement, 0, IndexIterator, kPrefetch>(
+      lookup, runtime_num_centers, hashed_database, it);
+}
+
 #define SCANN_SINGLE_ARG(...) __VA_ARGS__
 
 #define SCANN_INSTANTIATE_AH_FUNCTION_IMPL0(                                   \
     extern_or_nothing, LookupElement, kCompileTimeNumCenters, IndexIterator)   \
   extern_or_nothing template void                                              \
-  GetNeighborsViaAsymmetricDistanceWithCompileTimeNumCenters<                  \
+  GetNeighborsViaAsymmetricDistanceWithCompileTimeNumCentersImpl<              \
       DefaultDenseDatasetView<uint8_t>, LookupElement, kCompileTimeNumCenters, \
-      IndexIterator>(                                                          \
+      IndexIterator, false>(                                                   \
       ConstSpan<LookupElement> lookup, size_t runtime_num_centers,             \
       const DefaultDenseDatasetView<uint8_t>* __restrict__ hashed_database,    \
       IndexIterator it);
@@ -469,11 +508,18 @@ GetNeighborsViaAsymmetricDistanceWithCompileTimeNumCenters(
       extern_or_nothing, LookupElement, kCompileTimeNumCenters,            \
       SCANN_SINGLE_ARG(Postprocess));
 
-#define SCANN_INSTANTIATE_AH_FUNCTION_IMPL1_POPULATE(                      \
-    extern_or_nothing, LookupElement, kCompileTimeNumCenters, Postprocess) \
-  SCANN_INSTANTIATE_AH_FUNCTION_IMPL0(                                     \
-      extern_or_nothing, LookupElement, kCompileTimeNumCenters,            \
-      SCANN_SINGLE_ARG(PopulateDistancesIterator<6, Postprocess>));
+#define SCANN_INSTANTIATE_AH_FUNCTION_IMPL1_POPULATE(                          \
+    extern_or_nothing, LookupElement, kCompileTimeNumCenters, Postprocess)     \
+  SCANN_INSTANTIATE_AH_FUNCTION_IMPL0(                                         \
+      extern_or_nothing, LookupElement, kCompileTimeNumCenters,                \
+      SCANN_SINGLE_ARG(PopulateDistancesIterator<6, Postprocess>));            \
+  extern_or_nothing template void                                              \
+  GetNeighborsViaAsymmetricDistanceWithCompileTimeNumCentersImpl<              \
+      DefaultDenseDatasetView<uint8_t>, LookupElement, kCompileTimeNumCenters, \
+      PopulateDistancesIterator<6, Postprocess>, true>(                        \
+      ConstSpan<LookupElement> lookup, size_t runtime_num_centers,             \
+      const DefaultDenseDatasetView<uint8_t>* __restrict__ hashed_database,    \
+      PopulateDistancesIterator<6, Postprocess> it);
 
 #define SCANN_INSTANTIATE_AH_FUNCTION_IMPL2_CROWDING( \
     extern_or_nothing, LookupElement, kCompileTimeNumCenters, Postprocess)
@@ -509,16 +555,11 @@ GetNeighborsViaAsymmetricDistanceWithCompileTimeNumCenters(
                                       kCompileTimeNumCenters,                  \
                                       LimitedInnerFunctor);
 
-#define SCANN_INSTANTIATE_AH_FUNCTION_IMPL4(extern_or_nothing, LookupElement) \
-  SCANN_INSTANTIATE_AH_FUNCTION_IMPL3(extern_or_nothing, LookupElement, 256); \
-  SCANN_INSTANTIATE_AH_FUNCTION_IMPL3(extern_or_nothing, LookupElement, 128); \
-  SCANN_INSTANTIATE_AH_FUNCTION_IMPL3(extern_or_nothing, LookupElement, 16);  \
-  SCANN_INSTANTIATE_AH_FUNCTION_IMPL3(extern_or_nothing, LookupElement, 0);
-
-#define SCANN_INSTANTIATE_AH_FUNCTION(extern_or_nothing)            \
-  SCANN_INSTANTIATE_AH_FUNCTION_IMPL4(extern_or_nothing, float);    \
-  SCANN_INSTANTIATE_AH_FUNCTION_IMPL4(extern_or_nothing, uint16_t); \
-  SCANN_INSTANTIATE_AH_FUNCTION_IMPL4(extern_or_nothing, uint8_t);
+#define SCANN_INSTANTIATE_AH_FUNCTION(extern_or_nothing)               \
+  SCANN_INSTANTIATE_AH_FUNCTION_IMPL3(extern_or_nothing, float, 0);    \
+  SCANN_INSTANTIATE_AH_FUNCTION_IMPL3(extern_or_nothing, uint16_t, 0); \
+  SCANN_INSTANTIATE_AH_FUNCTION_IMPL3(extern_or_nothing, uint8_t, 0);  \
+  SCANN_INSTANTIATE_AH_FUNCTION_IMPL3(extern_or_nothing, uint8_t, 256);
 
 SCANN_INSTANTIATE_AH_FUNCTION(extern);
 

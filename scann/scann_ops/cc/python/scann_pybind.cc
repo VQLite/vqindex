@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,5 +28,18 @@ PYBIND11_MODULE(scann_pybind, py_module) {
                           const std::string&, int>())
       .def("search", &research_scann::ScannNumpy::Search)
       .def("search_batched", &research_scann::ScannNumpy::SearchBatched)
-      .def("serialize", &research_scann::ScannNumpy::Serialize);
+
+      .def("upsert", &research_scann::ScannNumpy::Upsert)
+      .def("delete", &research_scann::ScannNumpy::Delete)
+      .def("rebalance", &research_scann::ScannNumpy::Rebalance)
+      .def_static("suggest_autopilot",
+                  &research_scann::ScannNumpy::SuggestAutopilot)
+      .def("size", &research_scann::ScannNumpy::Size)
+      .def("reserve", &research_scann::ScannNumpy::Reserve)
+      .def("set_num_threads", &research_scann::ScannNumpy::SetNumThreads)
+      .def("config", &research_scann::ScannNumpy::Config)
+      .def("serialize", &research_scann::ScannNumpy::Serialize)
+      .def("get_health_stats", &research_scann::ScannNumpy::GetHealthStats)
+      .def("initialize_health_stats",
+           &research_scann::ScannNumpy::InitializeHealthStats);
 }

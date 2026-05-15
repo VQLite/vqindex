@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@
 #include <utility>
 
 #include "scann/base/search_parameters.h"
+#include "scann/utils/common.h"
 #include "scann/utils/types.h"
 
 namespace research_scann {
@@ -41,6 +42,19 @@ class TreeXOptionalParameters final
 
   ConstSpan<int32_t> leaf_tokens_to_search() const {
     return leaf_tokens_to_search_;
+  }
+
+  Status EnablePreTokenizationWithDistances(
+      vector<pair<DatapointIndex, float>> centers_to_search);
+
+  void DisablePreTokenizationWithDistances() { centers_to_search_.clear(); }
+
+  bool pre_tokenization_with_distances_enabled() const {
+    return !centers_to_search_.empty();
+  }
+
+  ConstSpan<pair<DatapointIndex, float>> centers_to_search() const {
+    return centers_to_search_;
   }
 
   shared_ptr<const SearcherSpecificOptionalParameters>
@@ -64,6 +78,8 @@ class TreeXOptionalParameters final
 
  private:
   vector<int32_t> leaf_tokens_to_search_ = {};
+
+  vector<pair<DatapointIndex, float>> centers_to_search_ = {};
 
   int32_t num_partitions_to_search_override_ = 0;
 

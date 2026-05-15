@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,26 +21,23 @@
 
 #include "absl/strings/match.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/string_view.h"
 #include "absl/strings/substitute.h"
 #include "scann/data_format/features.pb.h"
-#include "scann/distance_measures/distance_measure_base.h"
 #include "scann/distance_measures/distance_measure_factory.h"
+#include "scann/oss_wrappers/scann_status.h"
 #include "scann/partitioning/partitioner.pb.h"
 #include "scann/proto/brute_force.pb.h"
 #include "scann/proto/distance_measure.pb.h"
 #include "scann/proto/exact_reordering.pb.h"
 #include "scann/proto/hash.pb.h"
-#include "scann/proto/incremental_updates.pb.h"
 #include "scann/proto/input_output.pb.h"
 #include "scann/proto/metadata.pb.h"
 #include "scann/proto/partitioning.pb.h"
 #include "scann/proto/projection.pb.h"
-#include "scann/proto/restricts.pb.h"
 #include "scann/proto/scann.pb.h"
 #include "scann/utils/common.h"
 #include "scann/utils/types.h"
-#include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/lib/core/status.h"
 
 using absl::StartsWith;
 
@@ -78,25 +75,6 @@ Status CanonicalizeDeprecatedFields(ScannConfig* config) {
           bf->scalar_quantization_multiplier_quantile());
     }
   }
-
-  bool restrict_fields_populated = false;
-  if (config->has_restricts()) {
-    restrict_fields_populated = true;
-    if (config->restricts().has_enabled()) {
-      config->set_restricts_enabled(config->restricts().enabled());
-    }
-    if (config->restricts().has_v3_restricts()) {
-      *config->mutable_v3_restricts() = config->restricts().v3_restricts();
-    }
-  }
-  if (!restrict_fields_populated && config->restricts_enabled()) {
-    auto* restricts = config->mutable_restricts();
-    restricts->set_enabled(true);
-
-    if (config->has_v3_restricts()) {
-      *restricts->mutable_v3_restricts() = config->v3_restricts();
-    }
-  }
   return OkStatus();
 }
 
@@ -132,22 +110,9 @@ Status CanonicalizeScannConfigImpl(ScannConfig* config,
             "by the DEFAULT_SAMPLING_TRAINER");
       }
     }
-
-    if (config->has_hash() && config->hash().has_asymmetric_hash()) {
-      const auto& asymmetric_hash = config->hash().asymmetric_hash();
-      if (asymmetric_hash.use_normalized_residual_quantization()) {
-        if (!asymmetric_hash.use_residual_quantization()) {
-          return InvalidArgumentError(
-              "use_normalized_residual_quantization can only be used when "
-              "use_residual_quantization is also turned on");
-        }
-
-        config->mutable_partitioning()->set_compute_residual_stdev(true);
-      }
-    }
   }
 
-  if (!io->has_database_wildcard()) {
+  if (!io->has_database_wildcard() && !io->has_database_tableio()) {
     return CanonicalizeRecallCurves(config);
   }
 
@@ -217,6 +182,39 @@ Status CanonicalizeScannConfigForRetrieval(ScannConfig* config) {
   return OkStatus();
 }
 
+void StripPreprocessedArtifacts(ScannConfig* config) {
+  if (config->has_input_output()) {
+    InputOutputConfig* io = config->mutable_input_output();
+    io->clear_preprocessed_artifacts_dir();
+    io->clear_hashed_database_wildcard();
+    io->clear_fixed_point_database_wildcard();
+    io->clear_fixed_point_database_wildcard();
+    io->clear_tokenized_database_wildcard();
+    io->clear_memory_consumption_estimate_filename();
+  }
+
+  if (config->has_partitioning()) {
+    config->mutable_partitioning()->clear_partitioner_prefix();
+    config->mutable_partitioning()->clear_resharded_prefix();
+  }
+
+  if (config->hash().has_asymmetric_hash()) {
+    config->mutable_hash()->mutable_asymmetric_hash()->clear_centers_filename();
+  }
+
+  if (config->exact_reordering().fixed_point().has_multipliers_filename()) {
+    config->mutable_exact_reordering()
+        ->mutable_fixed_point()
+        ->clear_multipliers_filename();
+  }
+
+  if (config->brute_force().fixed_point().has_multipliers_filename()) {
+    config->mutable_brute_force()
+        ->mutable_fixed_point()
+        ->clear_multipliers_filename();
+  }
+}
+
 StatusOr<InputOutputConfig::InMemoryTypes> TagFromGFVFeatureType(
     const GenericFeatureVector::FeatureType& feature_type) {
   switch (feature_type) {
@@ -235,7 +233,7 @@ StatusOr<InputOutputConfig::InMemoryTypes> TagFromGFVFeatureType(
 
 StatusOr<InputOutputConfig::InMemoryTypes> DetectInMemoryTypeFromGfv(
     const GenericFeatureVector& gfv) {
-  TF_ASSIGN_OR_RETURN(auto ret, TagFromGFVFeatureType(gfv.feature_type()));
+  SCANN_ASSIGN_OR_RETURN(auto ret, TagFromGFVFeatureType(gfv.feature_type()));
   return ret;
 }
 
@@ -261,8 +259,9 @@ StatusOr<InputOutputConfig::InMemoryTypes> DetectInMemoryTypeFromDisk(
 }
 
 StatusOr<Normalization> NormalizationRequired(
-    const std::string& distance_measure_name) {
-  TF_ASSIGN_OR_RETURN(auto distance, GetDistanceMeasure(distance_measure_name));
+    absl::string_view distance_measure_name) {
+  SCANN_ASSIGN_OR_RETURN(auto distance,
+                         GetDistanceMeasure(distance_measure_name));
   return distance->NormalizationRequired();
 }
 
@@ -280,8 +279,8 @@ Status EnsureCorrectNormalizationForDistanceMeasure(ScannConfig* config) {
   } else {
     return OkStatus();
   }
-  TF_ASSIGN_OR_RETURN(const Normalization expected_normalization,
-                      NormalizationRequired(main_distance_measure));
+  SCANN_ASSIGN_OR_RETURN(const Normalization expected_normalization,
+                         NormalizationRequired(main_distance_measure));
   const bool normalization_user_specified =
       config->input_output().has_norm_type();
 
@@ -306,7 +305,7 @@ Status EnsureCorrectNormalizationForDistanceMeasure(ScannConfig* config) {
     StatusOr<InputOutputConfig::InMemoryTypes> in_memory_type_or_error =
         DetectInMemoryTypeFromDisk(*config);
     if (in_memory_type_or_error.ok()) {
-      auto in_memory_type = in_memory_type_or_error.ValueOrDie();
+      auto in_memory_type = *in_memory_type_or_error;
       if (in_memory_type != InputOutputConfig::FLOAT &&
           in_memory_type != InputOutputConfig::DOUBLE) {
         return InvalidArgumentError(
@@ -316,10 +315,10 @@ Status EnsureCorrectNormalizationForDistanceMeasure(ScannConfig* config) {
     }
   }
 
-  auto verify_consistency = [&](const std::string& secondary_distance_measure,
+  auto verify_consistency = [&](absl::string_view secondary_distance_measure,
                                 const std::string& param_name) -> Status {
-    TF_ASSIGN_OR_RETURN(const Normalization secondary_expected,
-                        NormalizationRequired(secondary_distance_measure));
+    SCANN_ASSIGN_OR_RETURN(const Normalization secondary_expected,
+                           NormalizationRequired(secondary_distance_measure));
     if (secondary_expected != expected_normalization &&
         !(normalization_user_specified && secondary_expected == NONE)) {
       return InvalidArgumentError(

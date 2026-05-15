@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,6 +14,10 @@
 
 #include "scann/data_format/gfv_properties.h"
 
+#include "absl/log/check.h"
+#include "scann/data_format/features.pb.h"
+#include "scann/oss_wrappers/scann_status.h"
+#include "scann/utils/common.h"
 #include "scann/utils/types.h"
 
 namespace research_scann {
@@ -36,6 +40,9 @@ string_view GfvFeatureTypeName(int gfv_feature_type) {
 StatusOr<size_t> GetGfvVectorSize(const GenericFeatureVector& gfv) {
   switch (gfv.feature_type()) {
     case GenericFeatureVector::INT64:
+      return gfv.feature_value_is_int8_compressed()
+                 ? gfv.feature_value_int8().size()
+                 : gfv.feature_value_int64_size();
     case GenericFeatureVector::BINARY:
       return gfv.feature_value_int64_size();
     case GenericFeatureVector::FLOAT:
@@ -56,7 +63,7 @@ StatusOr<DimensionIndex> GetGfvDimensionality(const GenericFeatureVector& gfv) {
         "GenericFeatureVector dimensionality cannot be == 0.");
   }
 
-  TF_ASSIGN_OR_RETURN(bool is_sparse, IsGfvSparse(gfv));
+  SCANN_ASSIGN_OR_RETURN(bool is_sparse, IsGfvSparse(gfv));
   if (is_sparse) {
     return gfv.feature_dim();
   } else {
@@ -73,7 +80,7 @@ StatusOr<bool> IsGfvSparse(const GenericFeatureVector& gfv) {
     return true;
   }
 
-  TF_ASSIGN_OR_RETURN(DimensionIndex vector_size, GetGfvVectorSize(gfv));
+  SCANN_ASSIGN_OR_RETURN(DimensionIndex vector_size, GetGfvVectorSize(gfv));
   return vector_size == 0;
 }
 
@@ -82,33 +89,33 @@ StatusOr<bool> IsGfvDense(const GenericFeatureVector& gfv) {
     return false;
   }
 
-  TF_ASSIGN_OR_RETURN(bool is_sparse, IsGfvSparse(gfv));
+  SCANN_ASSIGN_OR_RETURN(bool is_sparse, IsGfvSparse(gfv));
   return !is_sparse;
 }
 
 Status GetGfvVectorSize(const GenericFeatureVector& gfv,
                         DimensionIndex* result) {
   DCHECK(result);
-  TF_ASSIGN_OR_RETURN(*result, GetGfvVectorSize(gfv));
+  SCANN_ASSIGN_OR_RETURN(*result, GetGfvVectorSize(gfv));
   return OkStatus();
 }
 
 Status GetGfvDimensionality(const GenericFeatureVector& gfv,
                             DimensionIndex* result) {
   DCHECK(result);
-  TF_ASSIGN_OR_RETURN(*result, GetGfvDimensionality(gfv));
+  SCANN_ASSIGN_OR_RETURN(*result, GetGfvDimensionality(gfv));
   return OkStatus();
 }
 
 Status IsGfvSparse(const GenericFeatureVector& gfv, bool* result) {
   DCHECK(result);
-  TF_ASSIGN_OR_RETURN(*result, IsGfvSparse(gfv));
+  SCANN_ASSIGN_OR_RETURN(*result, IsGfvSparse(gfv));
   return OkStatus();
 }
 
 Status IsGfvDense(const GenericFeatureVector& gfv, bool* result) {
   DCHECK(result);
-  TF_ASSIGN_OR_RETURN(*result, IsGfvDense(gfv));
+  SCANN_ASSIGN_OR_RETURN(*result, IsGfvDense(gfv));
   return OkStatus();
 }
 

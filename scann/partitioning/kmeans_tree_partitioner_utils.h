@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
 #include "scann/distance_measures/distance_measure_factory.h"
 #include "scann/partitioning/kmeans_tree_partitioner.h"
 #include "scann/partitioning/partitioner_base.h"
+#include "scann/partitioning/tree_brute_force_second_level_wrapper.h"
 
 namespace research_scann {
 
@@ -29,12 +30,12 @@ KMeansTreePartitionerFactoryPreSampledAndProjected(
   DCHECK(dataset);
   const absl::Time start = absl::Now();
 
-  TF_ASSIGN_OR_RETURN(auto training_dist,
-                      GetDistanceMeasure(config.partitioning_distance()));
+  SCANN_ASSIGN_OR_RETURN(auto training_dist,
+                         GetDistanceMeasure(config.partitioning_distance()));
 
   shared_ptr<const DistanceMeasure> database_tokenization_dist;
   if (config.has_database_tokenization_distance_override()) {
-    TF_ASSIGN_OR_RETURN(
+    SCANN_ASSIGN_OR_RETURN(
         database_tokenization_dist,
         GetDistanceMeasure(config.database_tokenization_distance_override()));
   } else {
@@ -43,7 +44,7 @@ KMeansTreePartitionerFactoryPreSampledAndProjected(
 
   shared_ptr<const DistanceMeasure> query_tokenization_dist;
   if (config.has_query_tokenization_distance_override()) {
-    TF_ASSIGN_OR_RETURN(
+    SCANN_ASSIGN_OR_RETURN(
         query_tokenization_dist,
         GetDistanceMeasure(config.query_tokenization_distance_override()));
   } else {
@@ -76,6 +77,10 @@ KMeansTreePartitionerFactoryPreSampledAndProjected(
       DatabaseSpillingConfig::FIXED_NUMBER_OF_CENTERS) {
     result->set_database_spilling_fixed_number_of_centers(
         config.database_spilling().max_spill_centers());
+  } else if (config.database_spilling().spilling_type() ==
+             DatabaseSpillingConfig::TWO_CENTER_ORTHOGONALITY_AMPLIFIED) {
+    result->set_orthogonality_amplification_lambda(
+        config.database_spilling().orthogonality_amplification_lambda());
   }
 
   if (config.query_tokenization_type() == PartitioningConfig::FLOAT) {
@@ -93,10 +98,7 @@ KMeansTreePartitionerFactoryPreSampledAndProjected(
     result->SetDatabaseTokenizationType(
         KMeansTreePartitioner<T>::FIXED_POINT_INT8);
   }
-
-  if (config.compute_residual_stdev()) {
-    result->set_populate_residual_stdev(true);
-  }
+  result->SetNumTokenizedBranch(config.num_tokenized_branch());
 
   const absl::Time stop = absl::Now();
   LOG(INFO) << "PartitionerFactory ran in " << stop - start << ".";

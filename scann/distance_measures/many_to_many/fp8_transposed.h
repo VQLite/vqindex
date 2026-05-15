@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -37,6 +37,14 @@ class FP8SimdBlockTransposedDatabase {
                                  uint8_t simd_block_size,
                                  ConstSpan<float> inverse_fp8_multipliers = {});
 
+  FP8SimdBlockTransposedDatabase(ConstSpan<int8_t> datapoint_major,
+                                 DimensionIndex dimensionality,
+                                 ConstSpan<float> inverse_fp8_multipliers = {});
+  FP8SimdBlockTransposedDatabase(ConstSpan<int8_t> datapoint_major,
+                                 DimensionIndex dimensionality,
+                                 uint8_t simd_block_size,
+                                 ConstSpan<float> inverse_fp8_multipliers = {});
+
   uint8_t simd_block_size() const { return simd_block_size_; }
 
   DimensionIndex dimensionality() const { return dimensionality_; }
@@ -59,6 +67,8 @@ class FP8SimdBlockTransposedDatabase {
                                           ? static_cast<size_t>(dimensionality_)
                                           : 0};
   }
+
+  Datapoint<int8_t> ReconstructDatapoint(DatapointIndex idx) const;
 
  private:
   void TransposeOneBlock(const int8_t* src, size_t block_size, int8_t* dest);

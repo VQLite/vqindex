@@ -13,10 +13,16 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <regex>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <atomic>
+#include <cmath>
+#include <cstring>
+#include <cstdlib>
 #include <mutex>
 #include <shared_mutex>
 
@@ -49,7 +55,7 @@ public:
             index_root_dir_ = index_root_dir;
         }
         storage_type_ = STORAGE_FILE;
-        if (storage_type_ >= STORAGE_FILE && storage_type_ <= STORAGE_MEMORY) {
+        if (config_i.storage_type_ >= STORAGE_FILE && config_i.storage_type_ <= STORAGE_MEMORY) {
             storage_type_ = config_i.storage_type_;
         }
 
@@ -940,7 +946,7 @@ bool VQLiteIndexScann::InitImpl(std::string& index_dir)
     Status ret = scann_handler->Initialize(config.DebugString(), scann_assets_pbtxt);
     if (!ret.ok()) {
         delete scann_handler;
-        LOG(INFO) << ret.error_message();
+        LOG(INFO) << ret.message();
         return false;
     }
 
@@ -989,7 +995,7 @@ int VQLiteIndexScann::TrainImpl(
     }
     Status ret = scann_handler->Initialize(*datasets_pre, npoints, config, nthreads, !is_brute_);
     if (!ret.ok()) {
-        LOG(INFO) << ret.error_message();
+        LOG(INFO) << ret.message();
         delete scann_handler;
         return -1;
     }
@@ -1010,7 +1016,7 @@ int VQLiteIndexScann::DumpImpl(std::string& index_dir)
     }
     StatusOr<ScannAssets> assets_or = scann_handler_->Serialize(index_dir);
     if (!assets_or.ok()) {
-        LOG(INFO) << assets_or.status().error_message();
+        LOG(INFO) << assets_or.status().message();
         return -1;
     }
     Status ret = OpenSourceableFileWriter(index_dir + "/scann_assets.pbtxt")
@@ -1030,7 +1036,7 @@ int VQLiteIndexScann::SearchImpl(const float* queries, int32_t npoints,
     }
 
     vector<float> queries_vec(queries, queries + npoints * dim_);
-    auto query_dataset = DenseDataset<float>(queries_vec, npoints);
+    auto query_dataset = DenseDataset<float>(std::move(queries_vec), npoints);
 
     std::vector<std::vector<std::pair<uint32_t, float>>> s_res;
     s_res.resize(npoints);
@@ -1049,7 +1055,7 @@ int VQLiteIndexScann::SearchImpl(const float* queries, int32_t npoints,
     Status status = scann_handler_->SearchBatched(
         query_dataset, MakeMutableSpan(s_res), topk, reorder_topk, nprobe);
     if (!status.ok()) {
-        LOG(INFO) << "search error: " << status.error_message();
+        LOG(INFO) << "search error: " << status.message();
         return -2;
     }
 
@@ -1173,11 +1179,16 @@ ret_code_t vqindex_train_process(
             LOG(INFO) << "out dump, cret_code=" << cret_code;
         }
         LOG(INFO) << "out child process, pid=" << pid << "; cret_code=" << cret_code;
-        exit(cret_code);
+        exit(cret_code == RET_CODE_OK ? 0 : -cret_code);
     } else {
         LOG(INFO) << "in parent process, waitting.";
         wait(&child_status);
-        ret_code = (ret_code_t)child_status;
+        if (WIFEXITED(child_status)) {
+            int exit_code = WEXITSTATUS(child_status);
+            ret_code = exit_code == 0 ? RET_CODE_OK : (ret_code_t)(-exit_code);
+        } else {
+            ret_code = RET_CODE_ERR;
+        }
         LOG(INFO) << "out parent process, ret_code=" << ret_code << "; child_status" << child_status;
     }
 

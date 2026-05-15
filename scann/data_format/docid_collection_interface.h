@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,13 +15,19 @@
 #ifndef SCANN_DATA_FORMAT_DOCID_COLLECTION_INTERFACE_H_
 #define SCANN_DATA_FORMAT_DOCID_COLLECTION_INTERFACE_H_
 
+#include <cstddef>
+#include <optional>
+
+#include "absl/base/nullability.h"
+#include "scann/data_format/docid_lookup.h"
+#include "scann/utils/common.h"
 #include "scann/utils/types.h"
 
 namespace research_scann {
 
 class DocidCollectionInterface {
  public:
-  virtual ~DocidCollectionInterface() {}
+  virtual ~DocidCollectionInterface() = default;
 
   virtual Status Append(string_view docid) = 0;
 
@@ -29,7 +35,12 @@ class DocidCollectionInterface {
 
   virtual bool empty() const = 0;
 
+  virtual std::optional<size_t> fixed_len_size() const { return std::nullopt; }
+
   virtual string_view Get(size_t i) const = 0;
+
+  virtual void MultiGet(size_t num_docids, DpIdxGetter docid_idx_getter,
+                        StringSetter docid_setter) const = 0;
 
   virtual size_t capacity() const = 0;
 
@@ -43,24 +54,57 @@ class DocidCollectionInterface {
 
   virtual unique_ptr<DocidCollectionInterface> Copy() const = 0;
 
-  class Mutator {
+  class Mutator : public DocidLookup {
    public:
-    virtual ~Mutator() {}
+    ~Mutator() override = default;
 
     virtual Status AddDatapoint(string_view docid) = 0;
 
     virtual Status RemoveDatapoint(string_view docid) = 0;
 
-    virtual bool LookupDatapointIndex(string_view docid,
-                                      DatapointIndex* idx) const = 0;
-
     virtual void Reserve(size_t size) = 0;
 
     virtual Status RemoveDatapoint(DatapointIndex idx) = 0;
+
+    string_view ImplName() const override = 0;
   };
+
+  virtual StatusOr<DocidLookup*> GetDocidLookup() const {
+    auto mutator = GetMutator();
+    if (!mutator.ok()) {
+      return mutator.status();
+    }
+    return mutator.value();
+  }
 
   virtual StatusOr<Mutator*> GetMutator() const = 0;
 };
+
+class DocidLookupMap : public DocidLookup {
+ public:
+  ~DocidLookupMap() override = default;
+
+  virtual void Clear() = 0;
+
+  virtual void Reserve(size_t size) = 0;
+
+  virtual Status AddDatapoint(string_view docid, DatapointIndex dp_idx) = 0;
+
+  virtual Status RemoveDatapoint(string_view docid) = 0;
+
+  virtual Status RemoveDatapoint(DatapointIndex dp_idx) = 0;
+
+  string_view ImplName() const override = 0;
+
+ protected:
+  explicit DocidLookupMap(const DocidCollectionInterface* docids)
+      : docids_(docids) {}
+
+  const DocidCollectionInterface* docids_ = nullptr;
+};
+
+absl::StatusOr<std::unique_ptr<DocidLookupMap>> CreateDocidLookupMap(
+    DocidCollectionInterface* docids);
 
 }  // namespace research_scann
 

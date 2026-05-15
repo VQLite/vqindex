@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,12 +15,24 @@
 #ifndef SCANN_OSS_WRAPPERS_SCANN_THREADPOOL_H_
 #define SCANN_OSS_WRAPPERS_SCANN_THREADPOOL_H_
 
-#include "tensorflow/core/lib/core/threadpool.h"
+#include <functional>
+#include <memory>
+
+#include "Eigen/ThreadPool"
+#include "absl/strings/string_view.h"
 
 namespace research_scann {
 
-using ::tensorflow::thread::ThreadPool;
+class ThreadPool {
+ public:
+  ThreadPool(absl::string_view name, int num_threads);
+  void Schedule(std::function<void()> fn);
+  int NumThreads() const;
 
-}
+ private:
+  std::unique_ptr<Eigen::ThreadPool> eigen_threadpool_;
+};
+
+}  // namespace research_scann
 
 #endif

@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,41 +24,23 @@
 namespace tensorflow {
 namespace scann_ops {
 
-Status TensorFromProto(OpKernelContext* context, absl::string_view name,
-                       const protobuf::MessageLite* proto);
+absl::Status TensorFromProto(OpKernelContext* context, absl::string_view name,
+                             const protobuf::MessageLite* proto);
 void TensorFromProtoRequireOk(OpKernelContext* context, absl::string_view name,
                               const protobuf::MessageLite* proto);
 
-Status EmptyTensor(OpKernelContext* context, absl::string_view name);
+absl::Status EmptyTensor(OpKernelContext* context, absl::string_view name);
 
 void EmptyTensorRequireOk(OpKernelContext* context, absl::string_view name);
 
 Status ConvertStatus(const Status& status);
 
-template <typename T>
-Status PopulateDatapointFromTensor(const Tensor& tensor,
-                                   research_scann::DatapointPtr<T>* datapoint);
-
 template <typename DstType, typename SrcType = DstType>
-Status PopulateDenseDatasetFromTensor(
+absl::Status PopulateDenseDatasetFromTensor(
     const Tensor& tensor, research_scann::DenseDataset<DstType>* dataset);
 
-template <typename T>
-Status PopulateDatapointFromTensor(const Tensor& tensor,
-                                   research_scann::DatapointPtr<T>* datapoint) {
-  if (tensor.dims() != 1) {
-    return errors::InvalidArgument("Dataset must be 1-dimensional",
-                                   tensor.DebugString());
-  }
-  auto tensor_flat = tensor.flat<T>();
-  int dims = tensor.NumElements();
-  *datapoint =
-      research_scann::DatapointPtr<T>(nullptr, tensor_flat.data(), dims, dims);
-  return OkStatus();
-}
-
 template <typename DstType, typename SrcType>
-Status PopulateDenseDatasetFromTensor(
+absl::Status PopulateDenseDatasetFromTensor(
     const Tensor& tensor, research_scann::DenseDataset<DstType>* dataset) {
   if (tensor.dims() != 2) {
     return errors::InvalidArgument("Dataset must be 2-dimensional",
@@ -84,14 +66,15 @@ Status PopulateDenseDatasetFromTensor(
 }
 
 template <typename T>
-Status TensorFromDenseDataset(OpKernelContext* context, absl::string_view name,
-                              const research_scann::DenseDataset<T>* dataset) {
+absl::Status TensorFromDenseDataset(
+    OpKernelContext* context, absl::string_view name,
+    const research_scann::DenseDataset<T>* dataset) {
   if (dataset == nullptr) return EmptyTensor(context, name);
   Tensor* tensor;
   TF_RETURN_IF_ERROR(context->allocate_output(
       name,
-      TensorShape(
-          {dataset->size(), static_cast<int64_t>(dataset->dimensionality())}),
+      TensorShape({static_cast<int64_t>(dataset->size()),
+                   static_cast<int64_t>(dataset->dimensionality())}),
       &tensor));
   auto tensor_flat = tensor->flat<T>();
   std::copy(dataset->data().begin(), dataset->data().end(), tensor_flat.data());
@@ -106,8 +89,8 @@ void TensorFromDenseDatasetRequireOk(
 }
 
 template <typename T>
-Status TensorFromSpan(OpKernelContext* context, absl::string_view name,
-                      research_scann::ConstSpan<T> span) {
+absl::Status TensorFromSpan(OpKernelContext* context, absl::string_view name,
+                            research_scann::ConstSpan<T> span) {
   if (span.empty()) return EmptyTensor(context, name);
   Tensor* tensor;
   TF_RETURN_IF_ERROR(context->allocate_output(
@@ -126,11 +109,6 @@ void TensorFromSpanRequireOk(OpKernelContext* context, absl::string_view name,
 template <typename T>
 research_scann::ConstSpan<T> TensorToConstSpan(const Tensor* t) {
   return absl::MakeConstSpan(t->flat<T>().data(), t->NumElements());
-}
-
-template <typename T>
-research_scann::MutableSpan<T> TensorToMutableSpan(const Tensor* t) {
-  return absl::MakeSpan(t->flat<T>().data(), t->NumElements());
 }
 
 }  // namespace scann_ops

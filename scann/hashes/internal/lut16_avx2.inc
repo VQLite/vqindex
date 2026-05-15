@@ -6,9 +6,9 @@
 
 #ifdef __x86_64__
 
+#include "absl/base/prefetch.h"
 #include "scann/utils/bits.h"
 #include "scann/utils/intrinsics/avx2.h"
-#include "tensorflow/core/platform/prefetch.h"
 
 namespace research_scann {
 namespace asymmetric_hashing_internal {
@@ -65,11 +65,9 @@ SCANN_AVX2_INLINE Avx2<int16_t, kNumQueries, 2> Avx2LUT16BottomLoop(
   for (; num_unroll_iter != 0; --num_unroll_iter) {
     constexpr uint32_t kPointsPerIter = 32;
     if constexpr (kPrefetch == PrefetchStrategy::kSeq) {
-      ::tensorflow::port::prefetch<::tensorflow::port::PREFETCH_HINT_T0>(
-          data_start + kPrefetchBytesAhead);
+      absl::PrefetchToLocalCache(data_start + kPrefetchBytesAhead);
     } else if constexpr (kPrefetch == PrefetchStrategy::kSmart) {
-      ::tensorflow::port::prefetch<::tensorflow::port::PREFETCH_HINT_T0>(
-          prefetch_start);
+      absl::PrefetchToLocalCacheNta(prefetch_start);
       prefetch_start += kPointsPerIter;
     }
 
@@ -337,6 +335,16 @@ SCANN_AVX2_INLINE void GetTopInt16DistancesImpl(
   ssize_t next_prefetch_idx =
       ComputeSmartPrefetchIndex(num_blocks, num_32dp_simd_iters);
   for (DatapointIndex k : Seq(num_32dp_simd_iters)) {
+    bool can_skip_batch = true;
+    for (size_t j : Seq(kNumQueries)) {
+      if (restrict_whitelist_ptrs[j] == nullptr ||
+          restrict_whitelist_ptrs[j][k] != 0) {
+        can_skip_batch = false;
+        break;
+      }
+    }
+    if (can_skip_batch) continue;
+
     const uint8_t* data_start = packed_dataset + k * 16 * num_blocks;
     auto int16_accums = PrefetchDispatcher<kNumQueries, kPrefetch>(
         data_start, lookups, num_blocks, next_partition, &next_prefetch_idx);
@@ -394,9 +402,12 @@ SCANN_AVX2_INLINE int16_t GetInt16Threshold(float float_threshold) {
 
 namespace {
 template <size_t kNumQueries, PrefetchStrategy kPrefetch, bool kHasAnyPredicate,
-          typename TopN>
+          bool kWithSpilling = false, typename TopN>
 SCANN_AVX2_INLINE void GetTopFloatDistancesImpl(
     LUT16ArgsTopN<float, TopN> args) {
+  static_assert(
+      !kHasAnyPredicate || !kWithSpilling,
+      "Spilling is incompatible with datapoint translation predicates.");
   const uint8_t* packed_dataset = args.packed_dataset;
   const uint8_t* next_partition = args.next_partition;
   const size_t num_32dp_simd_iters = args.num_32dp_simd_iters;
@@ -437,8 +448,17 @@ SCANN_AVX2_INLINE void GetTopFloatDistancesImpl(
   ssize_t next_prefetch_idx =
       ComputeSmartPrefetchIndex(num_blocks, num_32dp_simd_iters);
   for (DatapointIndex k : Seq(num_32dp_simd_iters)) {
-    const uint8_t* data_start = packed_dataset + k * 16 * num_blocks;
+    bool can_skip_batch = true;
+    for (size_t j : Seq(kNumQueries)) {
+      if (restrict_whitelist_ptrs[j] == nullptr ||
+          restrict_whitelist_ptrs[j][k] != 0) {
+        can_skip_batch = false;
+        break;
+      }
+    }
+    if (can_skip_batch) continue;
 
+    const uint8_t* data_start = packed_dataset + k * 16 * num_blocks;
     auto int16_accums = PrefetchDispatcher<kNumQueries, kPrefetch>(
         data_start, lookups, num_blocks, next_partition, &next_prefetch_idx);
     for (size_t j : Seq(kNumQueries)) {
@@ -472,7 +492,10 @@ SCANN_AVX2_INLINE void GetTopFloatDistancesImpl(
       while (push_mask) {
         const int offset = bits::FindLSBSetNonZero(push_mask);
         push_mask &= (push_mask - 1);
-        DatapointIndex dp_idx = first_dp_index + 32 * k + offset;
+        DatapointIndex dp_idx;
+        if constexpr (!kWithSpilling) {
+          dp_idx = first_dp_index + 32 * k + offset;
+        }
         DCHECK(
             !restrict_whitelist_ptrs[j] ||
             args.restrict_whitelists[j].IsWhitelisted(dp_idx - first_dp_index))
@@ -483,8 +506,10 @@ SCANN_AVX2_INLINE void GetTopFloatDistancesImpl(
           }
         }
 
-        const bool needs_gc =
-            topn_mutators[j].Push(dp_idx, distances_buffer[offset]);
+        DCHECK_LE(distances_buffer[offset],
+                  topn_mutators[j].epsilon() + (*inv_mults[j])[0]);
+        const bool needs_gc = topn_mutators[j].PushNoEpsilonCheck(
+            dp_idx, distances_buffer[offset]);
         if (ABSL_PREDICT_FALSE(needs_gc)) {
           topn_mutators[j].GarbageCollect();
 

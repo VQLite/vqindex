@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,8 +21,11 @@
 #include <utility>
 
 #include "absl/random/distributions.h"
+#include "absl/status/status.h"
 #include "scann/data_format/datapoint.h"
+#include "scann/data_format/dataset.h"
 #include "scann/distance_measures/one_to_many/one_to_many.h"
+#include "scann/distance_measures/one_to_many/one_to_many_symmetric.h"
 #include "scann/hashes/internal/asymmetric_hashing_postprocess.h"
 #include "scann/oss_wrappers/scann_random.h"
 #include "scann/oss_wrappers/scann_status.h"
@@ -31,8 +34,6 @@
 #include "scann/utils/gmm_utils.h"
 #include "scann/utils/top_n_amortized_constant.h"
 #include "scann/utils/types.h"
-#include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/lib/core/status.h"
 
 namespace research_scann {
 namespace asymmetric_hashing_internal {
@@ -47,9 +48,10 @@ StatusOr<vector<DenseDataset<double>>> AhImpl<T>::TrainAsymmetricHashing(
 
   ChunkedDatapoint<double> chunked_vec;
 
+  SCANN_RET_CHECK(opts.projector());
   if (opts.preprocessing_function()) {
-    TF_ASSIGN_OR_RETURN(Datapoint<T> preprocessed,
-                        opts.preprocessing_function()(dataset[0]));
+    SCANN_ASSIGN_OR_RETURN(Datapoint<T> preprocessed,
+                           opts.preprocessing_function()(dataset[0]));
     SCANN_RETURN_IF_ERROR(
         opts.projector()->ProjectInput(preprocessed.ToPtr(), &chunked_vec));
   } else {
@@ -114,9 +116,9 @@ StatusOr<vector<DenseDataset<double>>> AhImpl<T>::TrainAsymmetricHashing(
 
   if (opts.preprocessing_function()) {
     for (DatapointIndex i : sample) {
-      SCANN_RETURN_IF_ERROR(VerifyAllFinite(dataset[i].values_slice()));
-      TF_ASSIGN_OR_RETURN(Datapoint<T> preprocessed,
-                          opts.preprocessing_function()(dataset[i]));
+      SCANN_RETURN_IF_ERROR(VerifyAllFinite(dataset[i].values_span()));
+      SCANN_ASSIGN_OR_RETURN(Datapoint<T> preprocessed,
+                             opts.preprocessing_function()(dataset[i]));
       SCANN_RETURN_IF_ERROR(VerifyAllFinite(preprocessed.values()));
       SCANN_RETURN_IF_ERROR(
           opts.projector()->ProjectInput(preprocessed.ToPtr(), &chunked_vec));
@@ -124,19 +126,20 @@ StatusOr<vector<DenseDataset<double>>> AhImpl<T>::TrainAsymmetricHashing(
     }
   } else {
     for (DatapointIndex i : sample) {
-      SCANN_RETURN_IF_ERROR(VerifyAllFinite(dataset[i].values_slice()));
+      SCANN_RETURN_IF_ERROR(VerifyAllFinite(dataset[i].values_span()));
       SCANN_RETURN_IF_ERROR(
           opts.projector()->ProjectInput(dataset[i], &chunked_vec));
       append_chunked_blocks();
     }
   }
 
-  auto quantization_distance = opts.quantization_distance();
+  const auto& quantization_distance = opts.quantization_distance();
   GmmUtils::Options gmm_opts;
   gmm_opts.seed = opts.config().clustering_seed();
   gmm_opts.max_iterations = opts.config().max_clustering_iterations();
   gmm_opts.epsilon = opts.config().clustering_convergence_tolerance();
   gmm_opts.parallelization_pool = std::move(pool);
+  gmm_opts.partition_assignment_type = gmm_opts.UNBALANCED_FLOAT32;
   GmmUtils gmm(quantization_distance, gmm_opts);
 
   vector<DenseDataset<double>> all_centers(num_blocks);
@@ -148,10 +151,9 @@ StatusOr<vector<DenseDataset<double>>> AhImpl<T>::TrainAsymmetricHashing(
         {.final_partitions = &subpartitions, .weights = weights}));
 
     for (size_t center_idx : IndicesOf(centers)) {
-      SCANN_RETURN_IF_ERROR(
-          VerifyAllFinite(centers[center_idx].values_slice()));
+      SCANN_RETURN_IF_ERROR(VerifyAllFinite(centers[center_idx].values_span()));
       if (!opts.config().use_norm_biasing_correction()) continue;
-      TF_ASSIGN_OR_RETURN(
+      SCANN_ASSIGN_OR_RETURN(
           const double norm_bias_correction,
           ComputeNormBiasCorrection(chunked_dataset[i], centers[center_idx],
                                     subpartitions[center_idx]));
@@ -167,10 +169,10 @@ StatusOr<vector<DenseDataset<double>>> AhImpl<T>::TrainAsymmetricHashing(
 
     vector<uint32_t> centers_permutation(centers.size());
     std::iota(centers_permutation.begin(), centers_permutation.end(), 0U);
-    std::sort(centers_permutation.begin(), centers_permutation.end(),
-              [&subpartitions](uint32_t a, uint32_t b) {
-                return subpartitions[a].size() > subpartitions[b].size();
-              });
+    std::stable_sort(centers_permutation.begin(), centers_permutation.end(),
+                     [&subpartitions](uint32_t a, uint32_t b) {
+                       return subpartitions[a].size() > subpartitions[b].size();
+                     });
 
     constexpr size_t kAssumedCacheLineSize = 64;
     constexpr size_t kFloatsPerCacheLine =
@@ -253,7 +255,7 @@ Status AhImpl<T>::IndexDatapoint(const DatapointPtr<T>& input,
   result->mutable_values()->resize(result_size, 0);
 
   return AhImpl<T>::IndexDatapoint(input, projection, quantization_distance,
-                                   centers, result->mutable_values_slice());
+                                   centers, result->mutable_values_span());
 }
 
 namespace {
@@ -317,7 +319,7 @@ StatusOr<vector<std::vector<SubspaceResidualStats>>> ComputeResidualStats(
   SCANN_RET_CHECK_EQ(original_dptr_chunked.size(), num_subspaces);
   double chunked_norm = 0.0;
   for (size_t subspace_idx : Seq(num_subspaces)) {
-    for (FloatT x : original_dptr_chunked[subspace_idx].values_slice()) {
+    for (FloatT x : original_dptr_chunked[subspace_idx].values_span()) {
       chunked_norm += Square<double>(x);
     }
   }
@@ -331,11 +333,11 @@ StatusOr<vector<std::vector<SubspaceResidualStats>>> ComputeResidualStats(
         centers[subspace_idx];
     for (size_t cluster_idx : Seq(num_clusters_per_block)) {
       ConstSpan<FloatingTypeFor<T>> center =
-          cur_subspace_centers[cluster_idx].values_slice();
+          cur_subspace_centers[cluster_idx].values_span();
       ConstSpan<FloatT> maybe_residual_dptr_span =
-          maybe_residual_dptr_chunked[subspace_idx].values_slice();
+          maybe_residual_dptr_chunked[subspace_idx].values_span();
       ConstSpan<FloatT> original_dptr_span =
-          original_dptr_chunked[subspace_idx].values_slice();
+          original_dptr_chunked[subspace_idx].values_span();
       cur_subspace_residual_stats[cluster_idx] = ComputeResidualStatsForCluster(
           maybe_residual_dptr_span, original_dptr_span, inverse_chunked_norm,
           center);
@@ -439,11 +441,12 @@ Status AhImpl<T>::IndexDatapointNoiseShaped(
   SCANN_RET_CHECK_EQ(result.size(), centers.size());
   SCANN_RET_CHECK_EQ(maybe_residual_dptr.dimensionality(),
                      original_dptr.dimensionality());
-  TF_ASSIGN_OR_RETURN(auto residual_stats,
-                      ComputeResidualStats(maybe_residual_dptr, original_dptr,
-                                           centers, projection));
-
   SCANN_RETURN_IF_ERROR(ValidateNoiseShapingParams(threshold, eta));
+  SCANN_ASSIGN_OR_RETURN(
+      auto residual_stats,
+      ComputeResidualStats(maybe_residual_dptr, original_dptr, centers,
+                           projection));
+
   const double parallel_cost_multiplier =
       std::isnan(eta) ? ComputeParallelCostMultiplier(
                             threshold, SquaredL2Norm(original_dptr),
@@ -503,34 +506,62 @@ template <typename T>
 StatusOr<vector<float>> AhImpl<T>::CreateRawFloatLookupTable(
     const DatapointPtr<T>& query, const ChunkingProjection<T>& projection,
     const DistanceMeasure& lookup_distance,
-    ConstSpan<DenseDataset<FloatT>> centers, int32_t num_clusters_per_block) {
+    ConstSpan<DenseDataset<FloatT>> centers,
+    ConstSpan<FloatT> block_transposed_centers,
+    int32_t num_clusters_per_block) {
   ChunkedDatapoint<FloatT> projected;
   SCANN_RETURN_IF_ERROR(projection.ProjectInput(query, &projected));
   SCANN_RET_CHECK_EQ(centers.size(), projected.size());
 
+  const auto lookup_distance_tag =
+      lookup_distance.specially_optimized_distance_tag();
+  const bool distance_supported_for_transpose = [&]() {
+    switch (lookup_distance_tag) {
+      case DistanceMeasure::L1:
+      case DistanceMeasure::SQUARED_L2:
+      case DistanceMeasure::DOT_PRODUCT:
+      case DistanceMeasure::COSINE:
+        return true;
+      default:
+        return false;
+    }
+  }();
+
   vector<float> result(num_clusters_per_block * projected.size());
   float* result_row_start = result.data();
+  size_t centers_start_offset = 0;
+  if constexpr (std::is_same_v<FloatT, float>) {
+    if (!block_transposed_centers.empty() && distance_supported_for_transpose) {
+      for (size_t i = 0; i < centers.size();
+           ++i, result_row_start += num_clusters_per_block) {
+        const DatapointPtr<FloatT> projected_ptr = projected[i];
+        ConstSpan<float> cur_centers =
+            MakeConstSpan(block_transposed_centers)
+                .subspan(
+                    centers_start_offset,
+                    num_clusters_per_block * projected_ptr.dimensionality());
+        centers_start_offset +=
+            num_clusters_per_block * projected_ptr.dimensionality();
+        DenseDistanceOneToManyBlockTransposed(
+            lookup_distance_tag, projected_ptr, cur_centers,
+            MutableSpan<float>(result_row_start, num_clusters_per_block));
+      }
+      return std::move(result);
+    }
+  }
 
   for (size_t i = 0; i < centers.size();
        ++i, result_row_start += num_clusters_per_block) {
     const DatapointPtr<FloatT> projected_ptr = projected[i];
     const DenseDataset<FloatT>& cur_centers = centers[i];
-    if (projected_ptr.IsSparse()) {
-      for (size_t j = 0; j < num_clusters_per_block; ++j) {
-        result_row_start[j] = static_cast<float>(
-            lookup_distance.GetDistanceHybrid(projected_ptr, cur_centers[j]));
-      }
+    if (lookup_distance_tag == DistanceMeasure::LIMITED_INNER_PRODUCT) {
+      DenseDistanceOneToMany(
+          DotProductDistance(), projected_ptr, cur_centers,
+          MutableSpan<float>(result_row_start, num_clusters_per_block));
     } else {
-      if (lookup_distance.specially_optimized_distance_tag() ==
-          DistanceMeasure::LIMITED_INNER_PRODUCT) {
-        DenseDistanceOneToMany(
-            DotProductDistance(), projected_ptr, cur_centers,
-            MutableSpan<float>(result_row_start, num_clusters_per_block));
-      } else {
-        DenseDistanceOneToMany(
-            lookup_distance, projected_ptr, cur_centers,
-            MutableSpan<float>(result_row_start, num_clusters_per_block));
-      }
+      DenseDistanceOneToMany(
+          lookup_distance, projected_ptr, cur_centers,
+          MutableSpan<float>(result_row_start, num_clusters_per_block));
     }
   }
 
@@ -586,7 +617,7 @@ vector<T> ConvertLookupToFixedPoint(
   if (conversion_options.multiplier_quantile() == 1.0f) {
     if (conversion_options.float_to_int_conversion_method() == kRound) {
       return ConvertLookupToFixedPointImpl<T>(
-          raw_lookup, [](float f) { return std::lround(f); }, *multiplier);
+          raw_lookup, [](float f) { return std::round(f); }, *multiplier);
     } else {
       return ConvertLookupToFixedPointImpl<T>(
           raw_lookup, [](float f) { return static_cast<SignedT>(f); },
@@ -601,7 +632,7 @@ vector<T> ConvertLookupToFixedPoint(
       return ConvertLookupToFixedPointImpl<T>(
           raw_lookup,
           [&](float f) {
-            return static_cast<SignedT>(std::lround(compress_to_bounds(f)));
+            return static_cast<SignedT>(std::round(compress_to_bounds(f)));
           },
           *multiplier);
     } else {
@@ -662,36 +693,42 @@ vector<uint8_t> CreatePackedDataset(
   if (hashed_database.empty()) {
     return packed_dataset;
   }
+  const DatapointIndex data_size = hashed_database.size();
 
   DimensionIndex num_blocks = hashed_database[0].nonzero_entries();
-  packed_dataset.resize(num_blocks * ((hashed_database.size() + 31) & (~31)) /
+  packed_dataset.resize(num_blocks *
+                        ((data_size + kNumDatapointsPerBlock - 1) &
+                         (~(kNumDatapointsPerBlock - 1))) /
                         2);
   DatapointIndex k = 0;
-  for (; k < hashed_database.size() / 32; ++k) {
-    size_t start = k * 16 * num_blocks;
+  for (; k < data_size / kNumDatapointsPerBlock; ++k) {
+    size_t start = k * kPackedDatasetBlockSize * num_blocks;
     for (size_t j = 0; j < num_blocks; ++j) {
-      for (size_t m = 0; m < 16; m++) {
-        uint8_t u0 = hashed_database[k * 32 + m].values()[j];
-        uint8_t u1 = hashed_database[k * 32 + m + 16].values()[j];
-        packed_dataset[start + j * 16 + m] = u1 * 16 + u0;
+      for (size_t m = 0; m < kPackedDatasetBlockSize; m++) {
+        uint8_t u0 =
+            hashed_database[k * kNumDatapointsPerBlock + m].values()[j];
+        uint8_t u1 = hashed_database[k * kNumDatapointsPerBlock + m +
+                                     kPackedDatasetBlockSize]
+                         .values()[j];
+        packed_dataset[start + j * kPackedDatasetBlockSize + m] =
+            u1 * kPackedDatasetBlockSize + u0;
       }
     }
   }
 
-  if (k * 32 < hashed_database.size()) {
-    size_t start = k * 16 * num_blocks;
+  if (k * kNumDatapointsPerBlock < data_size) {
+    size_t start = k * kPackedDatasetBlockSize * num_blocks;
     for (size_t j = 0; j < num_blocks; ++j) {
-      for (size_t m = 0; m < 16; m++) {
-        DatapointIndex dp_idx = k * 32 + m;
-        dp_idx = dp_idx >= hashed_database.size() ? (hashed_database.size() - 1)
-                                                  : dp_idx;
+      for (size_t m = 0; m < kPackedDatasetBlockSize; m++) {
+        DatapointIndex dp_idx = k * kNumDatapointsPerBlock + m;
+        dp_idx = dp_idx >= data_size ? (data_size - 1) : dp_idx;
         uint8_t u0 = hashed_database[dp_idx].values()[j];
 
-        dp_idx = k * 32 + m + 16;
-        dp_idx = dp_idx >= hashed_database.size() ? (hashed_database.size() - 1)
-                                                  : dp_idx;
+        dp_idx = k * kNumDatapointsPerBlock + m + kPackedDatasetBlockSize;
+        dp_idx = dp_idx >= data_size ? (data_size - 1) : dp_idx;
         uint8_t u1 = hashed_database[dp_idx].values()[j];
-        packed_dataset[start + j * 16 + m] = u1 * 16 + u0;
+        packed_dataset[start + j * kPackedDatasetBlockSize + m] =
+            u1 * kPackedDatasetBlockSize + u0;
       }
     }
   }

@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,10 +16,18 @@
 
 #include <cstdint>
 #include <numeric>
+#include <utility>
 
-#include "scann/oss_wrappers/scann_aligned_malloc.h"
-#include "scann/utils/zip_sort.h"
-#include "tensorflow/core/platform/prefetch.h"
+#include "absl/log/check.h"
+#include "scann/data_format/datapoint.h"
+#include "scann/data_format/dataset.h"
+#include "scann/distance_measures/distance_measure_base.h"
+#include "scann/trees/kmeans_tree/kmeans_tree.pb.h"
+#include "scann/trees/kmeans_tree/kmeans_tree_node.h"
+#include "scann/trees/kmeans_tree/training_options.h"
+#include "scann/utils/common.h"
+#include "scann/utils/datapoint_utils.h"
+#include "scann/utils/types.h"
 
 namespace research_scann {
 
@@ -40,7 +48,7 @@ int32_t CountLeaves(const KMeansTreeNode& node) {
 
 }  // namespace
 
-KMeansTree::KMeansTree() {}
+KMeansTree::KMeansTree() = default;
 
 KMeansTree::KMeansTree(const SerializedKMeansTree& serialized) {
   learned_spilling_type_ = serialized.learned_spilling_type();
@@ -49,6 +57,18 @@ KMeansTree::KMeansTree(const SerializedKMeansTree& serialized) {
   n_tokens_ = CountLeaves(root_);
   root_.PopulateCurNodeCenters();
   root_.CreateFixedPointCenters();
+  CheckIfFlat();
+}
+
+KMeansTree KMeansTree::CreateFlat(DenseDataset<float> centers) {
+  KMeansTree result;
+  result.root_ = KMeansTreeNode::CreateFlat(std::move(centers));
+  result.n_tokens_ = CountLeaves(result.root_);
+  result.root_.PopulateCurNodeCenters();
+  result.root_.CreateFixedPointCenters();
+  result.CheckIfFlat();
+  CHECK(result.is_flat_);
+  return result;
 }
 
 Status KMeansTree::Train(const Dataset& training_data,
@@ -62,11 +82,23 @@ Status KMeansTree::Train(const Dataset& training_data,
   Status status = root_.Train(training_data, subset, training_distance,
                               k_per_level, 0, training_options);
   if (!status.ok()) return status;
+  if (root_.IsLeaf()) {
+    Datapoint<double> root_center;
+    SCANN_RETURN_IF_ERROR(training_data.MeanByDimension(&root_center));
+    Datapoint<float> root_center_float;
+    MaybeConvertDatapoint(root_center.ToPtr(), &root_center_float);
+    root_.float_centers_.AppendOrDie(root_center_float.ToPtr());
+
+    root_.children_ = vector<KMeansTreeNode>(1);
+    root_.children_[0].Reset();
+    root_.children_[0].indices_ = root_.indices_;
+  }
   n_tokens_ = root_.NumberLeaves(0);
   root_.PopulateCurNodeCenters();
   learned_spilling_type_ = training_options->learned_spilling_type;
   max_spill_centers_ = training_options->max_spill_centers;
   root_.CreateFixedPointCenters();
+  CheckIfFlat();
   return status;
 }
 
@@ -80,6 +112,16 @@ void KMeansTree::SerializeWithoutIndices(SerializedKMeansTree* result) const {
   CHECK(result != nullptr);
   result->set_learned_spilling_type(learned_spilling_type_);
   root_.CopyToProto(result->mutable_root(), false);
+}
+
+void KMeansTree::CheckIfFlat() {
+  if (root_.IsLeaf()) return;
+
+  bool all_children_are_leaves = true;
+  for (const KMeansTreeNode& node : root_.Children()) {
+    all_children_are_leaves = all_children_are_leaves && node.IsLeaf();
+  }
+  if (all_children_are_leaves) is_flat_ = true;
 }
 
 }  // namespace research_scann

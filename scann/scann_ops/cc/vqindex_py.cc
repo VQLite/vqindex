@@ -23,7 +23,7 @@ extern "C" {
 static PyObject* _vqlite_init(PyObject* self, PyObject* args)
 {
     char* index_dir_in = NULL;
-    int index_dir_len_in = 0;
+    Py_ssize_t index_dir_len_in = 0;
     int32_t dim = 128;
     int32_t storage_type = STORAGE_MEMORY;
     int64_t brute_threshold = 0;

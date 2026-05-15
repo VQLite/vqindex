@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,8 +16,15 @@
 
 #include <utility>
 
+#include "absl/strings/str_cat.h"
+#include "scann/data_format/dataset.h"
+#include "scann/distance_measures/distance_measure_base.h"
+#include "scann/hashes/asymmetric_hashing2/training_options_base.h"
+#include "scann/oss_wrappers/scann_status.h"
 #include "scann/projection/projection_factory.h"
+#include "scann/proto/hash.pb.h"
 #include "scann/proto/projection.pb.h"
+#include "scann/utils/common.h"
 #include "scann/utils/types.h"
 
 namespace research_scann {
@@ -27,9 +34,10 @@ template <typename T>
 TrainingOptions<T>::TrainingOptions(
     const AsymmetricHasherConfig& config,
     shared_ptr<const DistanceMeasure> quantization_distance,
-    const TypedDataset<T>& dataset)
+    const TypedDataset<T>& dataset, ThreadPool* pool)
     : TrainingOptionsTyped<T>(config, std::move(quantization_distance)) {
-  auto statusor = ChunkingProjectionFactory<T>(config.projection(), &dataset);
+  auto statusor =
+      ChunkingProjectionFactory<T>(config.projection(), &dataset, 0, pool);
   if (statusor.ok()) {
     this->projector_ = ValueOrDie(std::move(statusor));
   } else {

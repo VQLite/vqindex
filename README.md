@@ -1,6 +1,15 @@
 # VQIndex
 
-A simple vector search library based on Google scaNN, it only support Linux and MacOS.
+A simple vector search library based on the latest Google ScaNN, it only support Linux and MacOS.
+
+This fork keeps the existing `vqindex_api.h` C ABI used by VQLite and wraps
+ScaNN with add/train/search/dump/stats APIs.
+
+## Build requirements
+
+VQIndex builds only the ScaNN C++ core and does not require TensorFlow. Latest
+ScaNN requires Bazel 7.x and Clang. `vqindex_py` also needs Python headers from
+the Python selected by `PYTHON_BIN_PATH` or `python3`.
 
 ## Build vqindex py
 centos need "-lstdc++fs"
@@ -41,3 +50,11 @@ vqindex_py.release(handler)
 ./build.sh vqindex_api
 ```
 It will build "libs/libvqindex_api.so", you can use the "vqindex_api.h" for development.
+
+## Test the VQLite C API contract
+```
+./build.sh vqindex_api
+python3 test/test_go_scann_api.py
+```
+This test mirrors the Go wrapper in VQLite: file-backed storage, default
+training, search, dump/reload, and incremental add/train/search.

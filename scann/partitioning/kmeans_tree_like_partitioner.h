@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,10 +18,13 @@
 #define SCANN_PARTITIONING_KMEANS_TREE_LIKE_PARTITIONER_H_
 
 #include <cstdint>
+#include <limits>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "scann/data_format/datapoint.h"
 #include "scann/distance_measures/distance_measure_base.h"
+#include "scann/oss_wrappers/scann_threadpool.h"
 #include "scann/partitioning/partitioner_base.h"
 #include "scann/trees/kmeans_tree/kmeans_tree.h"
 #include "scann/utils/types.h"
@@ -31,9 +34,6 @@ namespace research_scann {
 template <typename T>
 class KMeansTreeLikePartitioner : public Partitioner<T> {
  public:
-  virtual const shared_ptr<const DistanceMeasure>&
-  database_tokenization_distance() const = 0;
-
   virtual const shared_ptr<const DistanceMeasure>& query_tokenization_distance()
       const = 0;
 
@@ -46,25 +46,45 @@ class KMeansTreeLikePartitioner : public Partitioner<T> {
 
   virtual Status TokensForDatapointWithSpilling(
       const DatapointPtr<T>& dptr, int32_t max_centers_override,
-      vector<KMeansTreeSearchResult>* result) const = 0;
+      vector<pair<DatapointIndex, float>>* result) const = 0;
 
   virtual Status TokensForDatapointWithSpillingBatched(
       const TypedDataset<T>& queries, ConstSpan<int32_t> max_centers_override,
-      MutableSpan<std::vector<KMeansTreeSearchResult>> results) const = 0;
+      MutableSpan<std::vector<pair<DatapointIndex, float>>> results,
+      ThreadPool* pool = nullptr) const = 0;
 
-  virtual Status TokenForDatapoint(const DatapointPtr<T>& dptr,
-                                   KMeansTreeSearchResult* result) const = 0;
+  virtual Status TokenForDatapoint(
+      const DatapointPtr<T>& dptr,
+      pair<DatapointIndex, float>* result) const = 0;
 
   virtual Status TokenForDatapointBatched(
       const TypedDataset<T>& queries,
-      std::vector<KMeansTreeSearchResult>* result) const = 0;
+      std::vector<pair<DatapointIndex, float>>* result,
+      ThreadPool* pool) const = 0;
+  Status TokenForDatapointBatched(
+      const TypedDataset<T>& queries,
+      std::vector<pair<DatapointIndex, float>>* result) const {
+    return TokenForDatapointBatched(queries, result, nullptr);
+  }
 
   virtual StatusOr<Datapoint<float>> ResidualizeToFloat(
-      const DatapointPtr<T>& dptr, int32_t token,
-      bool normalize_residual_by_cluster_stdev) const = 0;
+      const DatapointPtr<T>& dptr, int32_t token) const = 0;
 
-  virtual StatusOr<double> ResidualStdevForToken(int32_t token) const {
-    return 1.0;
+  StatusOr<Datapoint<float>> ResidualizeToFloat(const DatapointPtr<T>& dptr,
+                                                int32_t token, bool) const {
+    return ResidualizeToFloat(dptr, token);
+  }
+
+  virtual const DenseDataset<float>& LeafCenters() const = 0;
+
+  virtual uint32_t query_spilling_max_centers() const = 0;
+
+  virtual double query_spilling_threshold() const {
+    return std::numeric_limits<double>::infinity();
+  }
+
+  virtual QuerySpillingConfig::SpillingType query_spilling_type() const {
+    return QuerySpillingConfig::NO_SPILLING;
   }
 };
 

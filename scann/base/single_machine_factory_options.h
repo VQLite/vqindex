@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,30 +21,30 @@
 #include <utility>
 #include <vector>
 
+#include "scann/data_format/dataset.h"
+#include "scann/oss_wrappers/scann_threadpool.h"
 #include "scann/partitioning/partitioner.pb.h"
 #include "scann/proto/centers.pb.h"
-#include "scann/trees/kmeans_tree/kmeans_tree.h"
+#include "scann/proto/hash.pb.h"
+#include "scann/utils/common.h"
 #include "scann/utils/fixed_point/pre_quantized_fixed_point.h"
 #include "scann/utils/types.h"
-#include "tensorflow/core/platform/macros.h"
 
 namespace research_scann {
 template <typename T>
 class DenseDataset;
 template <typename T>
 class TypedDataset;
+class KMeansTree;
 template <typename T>
 class SingleMachineSearcherBase;
 class ScannConfig;
 
 struct SingleMachineFactoryOptions {
-  SingleMachineFactoryOptions() {}
-
-  StatusOr<DatapointIndex> ComputeConsistentSize(
-      const Dataset* dataset = nullptr) const;
+  SingleMachineFactoryOptions() = default;
 
   StatusOr<DimensionIndex> ComputeConsistentDimensionality(
-      const HashConfig& config, const Dataset* dataset = nullptr) const;
+      const ScannConfig& config, const Dataset* dataset = nullptr) const;
 
   TypeTag type_tag = kInvalidTypeTag;
 
@@ -53,6 +53,10 @@ struct SingleMachineFactoryOptions {
   shared_ptr<PreQuantizedFixedPoint> pre_quantized_fixed_point;
 
   shared_ptr<DenseDataset<uint8_t>> hashed_dataset;
+
+  shared_ptr<DenseDataset<uint8_t>> soar_hashed_dataset;
+
+  shared_ptr<DenseDataset<int16_t>> bfloat16_dataset;
 
   std::shared_ptr<CentersForAllSubspaces> ah_codebook;
 
@@ -63,6 +67,7 @@ struct SingleMachineFactoryOptions {
   std::shared_ptr<std::vector<std::string>> hash_parameters;
 
   shared_ptr<vector<int64_t>> crowding_attributes;
+  shared_ptr<vector<std::string>> crowding_dimension_names;
 
   shared_ptr<ThreadPool> parallelization_pool;
 };

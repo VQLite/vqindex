@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 #include <cstdint>
 
+#include "scann/proto/partitioning.pb.h"
 #include "scann/proto/projection.pb.h"
 
 namespace research_scann {
@@ -23,10 +24,14 @@ namespace research_scann {
 StatusOr<DatapointIndex> ComputeConsistentNumPointsFromIndex(
     const Dataset* dataset, const DenseDataset<uint8_t>* hashed_dataset,
     const PreQuantizedFixedPoint* pre_quantized_fixed_point,
-    const vector<int64_t>* crowding_attributes) {
-  if (!dataset && !hashed_dataset && !pre_quantized_fixed_point) {
+    const DenseDataset<int16_t>* bfloat16_dataset,
+    const vector<int64_t>* crowding_attributes,
+    const vector<std::string>* crowding_dimension_names) {
+  if (!dataset && !hashed_dataset && !pre_quantized_fixed_point &&
+      !bfloat16_dataset) {
     return InvalidArgumentError(
-        "dataset, hashed_dataset and pre_quantized_fixed_point are all null.");
+        "dataset, hashed_dataset, pre_quantized_fixed_point, and "
+        "bfloat16_dataset are all null.");
   }
 
   DatapointIndex sz = kInvalidDatapointIndex;
@@ -37,7 +42,7 @@ StatusOr<DatapointIndex> ComputeConsistentNumPointsFromIndex(
       sz = hashed_dataset->size();
     } else {
       SCANN_RET_CHECK_EQ(sz, hashed_dataset->size())
-              .SetErrorCode(error::INVALID_ARGUMENT)
+              .SetCode(absl::StatusCode::kInvalidArgument)
           << "Mismatch between original and hashed database sizes.";
     }
   }
@@ -49,15 +54,31 @@ StatusOr<DatapointIndex> ComputeConsistentNumPointsFromIndex(
     } else {
       SCANN_RET_CHECK_EQ(sz,
                          pre_quantized_fixed_point->fixed_point_dataset->size())
-              .SetErrorCode(error::INVALID_ARGUMENT)
+              .SetCode(absl::StatusCode::kInvalidArgument)
           << "Mismatch between original/hashed database and fixed-point "
+             "database sizes.";
+    }
+  }
+
+  if (bfloat16_dataset) {
+    if (sz == kInvalidDatapointIndex) {
+      sz = bfloat16_dataset->size();
+    } else {
+      SCANN_RET_CHECK_EQ(sz, bfloat16_dataset->size())
+              .SetCode(absl::StatusCode::kInvalidArgument)
+          << "Mismatch between original/hashed/int8 database and bfloat16 "
              "database sizes.";
     }
   }
 
   if (crowding_attributes && !crowding_attributes->empty() &&
       sz != kInvalidDatapointIndex) {
-    SCANN_RET_CHECK_EQ(crowding_attributes->size(), sz);
+    if (crowding_dimension_names && !crowding_dimension_names->empty()) {
+      SCANN_RET_CHECK_EQ(crowding_attributes->size(),
+                         crowding_dimension_names->size() * sz);
+    } else {
+      SCANN_RET_CHECK_EQ(crowding_attributes->size(), sz);
+    }
   }
 
   if (sz == kInvalidDatapointIndex)
@@ -66,12 +87,15 @@ StatusOr<DatapointIndex> ComputeConsistentNumPointsFromIndex(
 }
 
 StatusOr<DimensionIndex> ComputeConsistentDimensionalityFromIndex(
-    const HashConfig& config, const Dataset* dataset,
+    const ScannConfig& config, const Dataset* dataset,
     const DenseDataset<uint8_t>* hashed_dataset,
-    const PreQuantizedFixedPoint* pre_quantized_fixed_point) {
-  if (!dataset && !hashed_dataset && !pre_quantized_fixed_point) {
+    const PreQuantizedFixedPoint* pre_quantized_fixed_point,
+    const DenseDataset<int16_t>* bfloat16_dataset) {
+  if (!dataset && !hashed_dataset && !pre_quantized_fixed_point &&
+      !bfloat16_dataset) {
     return InvalidArgumentError(
-        "dataset, hashed_dataset and pre_quantized_fixed_point are all null.");
+        "dataset, hashed_dataset, pre_quantized_fixed_point, and "
+        "bfloat16_dataset are all null.");
   }
 
   DimensionIndex dims = kInvalidDimension;
@@ -83,9 +107,20 @@ StatusOr<DimensionIndex> ComputeConsistentDimensionalityFromIndex(
     if (dims == kInvalidDimension) {
       dims = d;
     } else {
-      SCANN_RET_CHECK_EQ(dims, d).SetErrorCode(error::INVALID_ARGUMENT)
+      SCANN_RET_CHECK_EQ(dims, d).SetCode(absl::StatusCode::kInvalidArgument)
           << "Mismatch between original and fixed-point database "
              "dimensionalities.";
+    }
+  }
+
+  if (bfloat16_dataset) {
+    DimensionIndex d = bfloat16_dataset->dimensionality();
+    if (dims == kInvalidDimension) {
+      dims = d;
+    } else {
+      SCANN_RET_CHECK_EQ(dims, d).SetCode(absl::StatusCode::kInvalidArgument)
+          << "Mismatch between original/fixed-point database and bfloat16 "
+             "database dimensionalities.";
     }
   }
 
@@ -95,21 +130,25 @@ StatusOr<DimensionIndex> ComputeConsistentDimensionalityFromIndex(
       if (dims == kInvalidDimension) {
         dims = d;
       } else {
-        SCANN_RET_CHECK_EQ(dims, d).SetErrorCode(error::INVALID_ARGUMENT)
-            << "Mismatch between original/fixed-point and hash projection "
-               "dimensionalities.";
+        SCANN_RET_CHECK_EQ(dims, d).SetCode(absl::StatusCode::kInvalidArgument)
+            << "Mismatch between original/fixed-point/bfloat16 and hash "
+               "projection dimensionalities.";
       }
     }
     return OkStatus();
   };
-  if (config.has_projection() && config.asymmetric_hash().has_projection())
+  if (config.partitioning().has_projection())
+    SCANN_RETURN_IF_ERROR(projection_check(config.partitioning().projection()));
+  const HashConfig& hash_config = config.hash();
+  if (hash_config.has_projection() &&
+      hash_config.asymmetric_hash().has_projection())
     return InvalidArgumentError(
         "Both hash and its asymmetric_hash subfield have projection configs.");
-  if (config.has_projection())
-    SCANN_RETURN_IF_ERROR(projection_check(config.projection()));
-  if (config.asymmetric_hash().has_projection())
+  if (hash_config.has_projection())
+    SCANN_RETURN_IF_ERROR(projection_check(hash_config.projection()));
+  if (hash_config.asymmetric_hash().has_projection())
     SCANN_RETURN_IF_ERROR(
-        projection_check(config.asymmetric_hash().projection()));
+        projection_check(hash_config.asymmetric_hash().projection()));
 
   if (dims == kInvalidDimension)
     return InvalidArgumentError(

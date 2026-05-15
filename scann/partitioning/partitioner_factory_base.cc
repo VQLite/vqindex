@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,28 +15,31 @@
 #include "scann/partitioning/partitioner_factory_base.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstddef>
 #include <memory>
 #include <utility>
+#include <vector>
 
-#include "absl/memory/memory.h"
-#include "absl/random/random.h"
-#include "absl/time/clock.h"
-#include "absl/time/time.h"
-#include "scann/distance_measures/distance_measure_factory.h"
+#include "absl/log/log.h"
+#include "scann/oss_wrappers/scann_status.h"
 #include "scann/proto/distance_measure.pb.h"
-#include "tensorflow/core/lib/core/errors.h"
+#include "scann/utils/random/reservoir_sampling.h"
+#include "scann/utils/types.h"
 
 namespace research_scann {
 
 namespace {
 
-float ComputeSamplingFraction(const PartitioningConfig& config,
-                              const Dataset* dataset) {
-  return (config.has_expected_sample_size())
-             ? std::min(1.0,
-                        static_cast<double>(config.expected_sample_size()) /
-                            dataset->size())
-             : config.partitioning_sampling_fraction();
+size_t ComputeSampleSize(const PartitioningConfig& config,
+                         const Dataset* dataset) {
+  return config.has_expected_sample_size()
+             ? std::min<size_t>(config.expected_sample_size(), dataset->size())
+             : static_cast<size_t>(std::ceil(
+
+                   static_cast<double>(
+                       config.partitioning_sampling_fraction()) *
+                   dataset->size()));
 }
 
 template <typename T>
@@ -46,8 +49,8 @@ StatusOr<unique_ptr<Partitioner<T>>> PartitionerFactoryNoProjection(
   const TypedDataset<T>* sampled;
   unique_ptr<TypedDataset<T>> sampled_mutable;
 
-  const float sampling_fraction = ComputeSamplingFraction(config, dataset);
-  if (sampling_fraction < 1.0) {
+  const size_t sample_size = ComputeSampleSize(config, dataset);
+  if (sample_size < dataset->size()) {
     sampled_mutable.reset(
         (dataset->IsSparse())
             ? absl::implicit_cast<TypedDataset<T>*>(new SparseDataset<T>)
@@ -56,12 +59,7 @@ StatusOr<unique_ptr<Partitioner<T>>> PartitionerFactoryNoProjection(
         sampled_mutable->NormalizeByTag(dataset->normalization()));
     sampled = sampled_mutable.get();
     MTRandom rng(kDeterministicSeed + 1);
-    vector<DatapointIndex> sample;
-    for (DatapointIndex i = 0; i < dataset->size(); ++i) {
-      if (absl::Uniform<float>(rng, 0, 1) < sampling_fraction) {
-        sample.push_back(i);
-      }
-    }
+    auto sample = ReservoirSampleIdxs(rng, dataset->size(), sample_size);
 
     sampled_mutable->Reserve(sample.size());
     for (DatapointIndex i : sample) {
@@ -70,6 +68,7 @@ StatusOr<unique_ptr<Partitioner<T>>> PartitionerFactoryNoProjection(
   } else {
     sampled = dataset;
   }
+  SCANN_RET_CHECK_EQ(sampled->size(), sample_size);
   LOG(INFO) << "Size of sampled dataset for training partition: "
             << sampled->size();
 
@@ -83,42 +82,63 @@ StatusOr<unique_ptr<Partitioner<T>>> PartitionerFactoryWithProjection(
   const TypedDataset<float>* sampled;
   unique_ptr<TypedDataset<float>> sampled_mutable;
   MTRandom rng(kDeterministicSeed + 1);
-  vector<DatapointIndex> sample;
-  const float sampling_fraction = ComputeSamplingFraction(config, dataset);
-  for (DatapointIndex i = 0; i < dataset->size(); ++i) {
-    if (absl::Uniform<float>(rng, 0, 1) < sampling_fraction) {
-      sample.push_back(i);
-    }
+  const size_t sample_size = ComputeSampleSize(config, dataset);
+  auto sample = ReservoirSampleIdxs(rng, dataset->size(), sample_size);
+
+  SCANN_RET_CHECK(!sample.empty())
+      << "Cannot create a partitioner from an empty sampled dataset.";
+  bool projected_is_sparse = false;
+  DimensionIndex projected_dimensionality = 0;
+  SCANN_ASSIGN_OR_RETURN(
+      unique_ptr<Projection<T>> projection,
+      ProjectionFactory<T>(config.projection(), dataset, 0, pool.get()));
+  {
+    Datapoint<float> projected;
+    SCANN_RETURN_IF_ERROR(
+        projection->ProjectInput(dataset->at(sample[0]), &projected));
+    projected_is_sparse = projected.IsSparse();
+
+    projected_dimensionality = projected.dimensionality();
   }
 
-  auto append_to_sampled = [&](const DatapointPtr<float>& dptr) -> Status {
-    if (ABSL_PREDICT_FALSE(!sampled_mutable)) {
-      if (dptr.IsSparse()) {
-        sampled_mutable = make_unique<SparseDataset<float>>();
-      } else {
-        sampled_mutable = make_unique<DenseDataset<float>>();
-      }
-      sampled_mutable->Reserve(sample.size());
+  if (projected_is_sparse) {
+    sampled_mutable = make_unique<SparseDataset<float>>();
+    SCANN_RETURN_IF_ERROR(
+        sampled_mutable->NormalizeByTag(dataset->normalization()));
+    sampled_mutable->Reserve(sample.size());
+    sampled = sampled_mutable.get();
+    Datapoint<float> projected;
+    for (DatapointIndex i : sample) {
       SCANN_RETURN_IF_ERROR(
-          sampled_mutable->NormalizeByTag(dataset->normalization()));
-      sampled = sampled_mutable.get();
+          projection->ProjectInput(dataset->at(i), &projected));
+      SCANN_RETURN_IF_ERROR(sampled_mutable->Append(projected.ToPtr(), ""));
     }
-    return sampled_mutable->Append(dptr, "");
-  };
-  TF_ASSIGN_OR_RETURN(unique_ptr<Projection<T>> projection,
-                      ProjectionFactory(config.projection(), dataset));
-  Datapoint<float> projected;
-  for (DatapointIndex i : sample) {
-    SCANN_RETURN_IF_ERROR(projection->ProjectInput(dataset->at(i), &projected));
-    SCANN_RETURN_IF_ERROR(append_to_sampled(projected.ToPtr()));
+  } else {
+    vector<float> sampled_storage(sample.size() * projected_dimensionality);
+    SCANN_RETURN_IF_ERROR(ParallelForWithStatus<1>(
+        IndicesOf(sample), pool.get(), [&](size_t sample_idx) -> Status {
+          Datapoint<float> projected;
+          SCANN_RETURN_IF_ERROR(projection->ProjectInput(
+              dataset->at(sample[sample_idx]), &projected));
+          std::copy(
+              projected.values().begin(), projected.values().end(),
+              sampled_storage.begin() + sample_idx * projected_dimensionality);
+          return OkStatus();
+        }));
+    sampled_mutable = make_unique<DenseDataset<float>>(
+        std::move(sampled_storage), sample.size());
+    SCANN_RETURN_IF_ERROR(
+        sampled_mutable->NormalizeByTag(dataset->normalization()));
+    sampled = sampled_mutable.get();
   }
+
   LOG(INFO) << "Size of sampled dataset for training partition: "
             << sampled->size();
-  TF_ASSIGN_OR_RETURN(
+  SCANN_ASSIGN_OR_RETURN(
       auto raw_partitioner,
       PartitionerFactoryPreSampledAndProjected(sampled, config, pool));
-  return MakeProjectingDecorator<T, float>(std::move(projection),
-                                           std::move(raw_partitioner));
+  return MakeProjectingDecorator<T>(std::move(projection),
+                                    std::move(raw_partitioner));
 }
 }  // namespace
 

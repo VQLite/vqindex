@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@
 #ifdef __x86_64__
 
 #include "scann/utils/intrinsics/attributes.h"
-#include "tensorflow/core/platform/types.h"
 
 namespace research_scann {
 namespace asymmetric_hashing_internal {

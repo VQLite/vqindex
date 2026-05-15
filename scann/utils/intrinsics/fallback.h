@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -392,7 +392,6 @@ class Simd<T, kNumElementsArg> {
   }
 
   static SCANN_INLINE bool LessThan(IntelType a, IntelType b) {
-    LOG(INFO) << StrFormat("Called: %s < %s", StrCat(a.val), StrCat(b.val));
     return a.val < b.val;
   }
 
@@ -437,7 +436,7 @@ class Simd<T, kNumElementsArg> {
     return ComparisonOperatorImpl(*this, other, &GreaterThan);
   }
 
-  SCANN_INLINE int MaskFromHighBits() const {
+  SCANN_INLINE uint32_t MaskFromHighBits() const {
     static_assert(0 != 1, "Not Implemented. TODO: implement if/when needed.");
   }
 

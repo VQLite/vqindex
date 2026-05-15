@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,25 +18,25 @@
 #define SCANN_DATA_FORMAT_DOCID_COLLECTION_H_
 
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "absl/container/flat_hash_map.h"
-#include "absl/container/node_hash_map.h"
+#include "absl/log/check.h"
 #include "scann/data_format/docid_collection_interface.h"
-#include "scann/data_format/internal/short_string_optimized_string.h"
+#include "scann/data_format/docid_lookup.h"
 #include "scann/oss_wrappers/scann_serialize.h"
+#include "scann/oss_wrappers/scann_status.h"
 #include "scann/utils/common.h"
 #include "scann/utils/types.h"
-#include "scann/utils/util_functions.h"
-#include "tensorflow/core/lib/core/errors.h"
 
 namespace research_scann {
 
 class VariableLengthDocidCollection final : public DocidCollectionInterface {
  public:
-  VariableLengthDocidCollection() {}
-  ~VariableLengthDocidCollection() final {}
+  VariableLengthDocidCollection() = default;
+  ~VariableLengthDocidCollection() final = default;
 
   VariableLengthDocidCollection(const VariableLengthDocidCollection& rhs);
   VariableLengthDocidCollection& operator=(
@@ -71,6 +71,20 @@ class VariableLengthDocidCollection final : public DocidCollectionInterface {
     return (all_empty()) ? "" : impl_->Get(i);
   }
 
+  void MultiGet(size_t num_docids, DpIdxGetter docid_idx_getter,
+                StringSetter docid_setter) const final {
+    if (!all_empty()) {
+      impl_->MultiGet(num_docids, std::move(docid_idx_getter),
+                      std::move(docid_setter));
+    } else {
+      for (size_t i = 0; i < num_docids; ++i) {
+        DatapointIndex idx = docid_idx_getter(i);
+        DCHECK_LT(idx, size_);
+        docid_setter(idx, "");
+      }
+    }
+  }
+
   size_t capacity() const final { return impl_ ? impl_->capacity() : 0; }
 
   size_t MemoryUsage() const final {
@@ -90,15 +104,20 @@ class VariableLengthDocidCollection final : public DocidCollectionInterface {
     Status AddDatapoint(string_view docid) final;
     bool LookupDatapointIndex(string_view docid,
                               DatapointIndex* index) const final;
+    void LookupDatapointIndices(size_t num_docids, DocidGetter docid_getter,
+                                LookupCallback callback) const final;
     Status RemoveDatapoint(string_view docid) final;
     Status RemoveDatapoint(DatapointIndex index) final;
     void Reserve(size_t size) final;
+    string_view ImplName() const final { return docid_lookup_->ImplName(); }
 
    private:
-    explicit Mutator(VariableLengthDocidCollection* docids) : docids_(docids) {}
+    explicit Mutator(VariableLengthDocidCollection* docids,
+                     unique_ptr<DocidLookupMap> docid_lookup)
+        : docids_(docids), docid_lookup_(std::move(docid_lookup)) {}
+
     VariableLengthDocidCollection* docids_ = nullptr;
-    absl::flat_hash_map<string_view, DatapointIndex, absl::Hash<string_view>>
-        docid_lookup_;
+    unique_ptr<DocidLookupMap> docid_lookup_;
   };
 
   StatusOr<DocidCollectionInterface::Mutator*> GetMutator() const final;
@@ -126,7 +145,7 @@ class FixedLengthDocidCollection final : public DocidCollectionInterface {
       default;
 
   explicit FixedLengthDocidCollection(size_t length) : docid_length_(length) {}
-  ~FixedLengthDocidCollection() final {}
+  ~FixedLengthDocidCollection() final = default;
 
   static StatusOr<FixedLengthDocidCollection> Iota(uint32_t length) {
     FixedLengthDocidCollection docids(sizeof(uint32_t));
@@ -143,6 +162,8 @@ class FixedLengthDocidCollection final : public DocidCollectionInterface {
 
   size_t size() const final { return size_; }
   bool empty() const final { return size_ == 0; }
+  std::optional<size_t> fixed_len_size() const final { return docid_length_; }
+
   void ShrinkToFit() final { arr_.shrink_to_fit(); }
 
   unique_ptr<DocidCollectionInterface> Copy() const final {
@@ -161,6 +182,9 @@ class FixedLengthDocidCollection final : public DocidCollectionInterface {
     return string_view(&arr_[i * docid_length_], docid_length_);
   }
 
+  void MultiGet(size_t num_docids, DpIdxGetter docid_idx_getter,
+                StringSetter docid_setter) const final;
+
   size_t capacity() const final { return arr_.capacity() / docid_length_; }
 
   size_t MemoryUsage() const final { return arr_.capacity() + sizeof(*this); }
@@ -178,17 +202,21 @@ class FixedLengthDocidCollection final : public DocidCollectionInterface {
     Status AddDatapoint(string_view docid) final;
     bool LookupDatapointIndex(string_view docid,
                               DatapointIndex* index) const final;
+    void LookupDatapointIndices(size_t num_docids, DocidGetter docid_getter,
+                                LookupCallback callback) const final;
     Status RemoveDatapoint(string_view docid) final;
     Status RemoveDatapoint(DatapointIndex index) final;
     void Reserve(size_t size) final;
+    string_view ImplName() const final { return docid_lookup_->ImplName(); }
 
    private:
     static constexpr int kGrowthFactor = 2;
-    explicit Mutator(FixedLengthDocidCollection* docids) : docids_(docids) {}
+    explicit Mutator(FixedLengthDocidCollection* docids,
+                     unique_ptr<DocidLookupMap> docid_lookup)
+        : docids_(docids), docid_lookup_(std::move(docid_lookup)) {}
 
     FixedLengthDocidCollection* docids_ = nullptr;
-    absl::flat_hash_map<string_view, DatapointIndex, absl::Hash<string_view>>
-        docid_lookup_;
+    unique_ptr<DocidLookupMap> docid_lookup_;
   };
 
   StatusOr<DocidCollectionInterface::Mutator*> GetMutator() const final;
