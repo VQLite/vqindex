@@ -11,26 +11,80 @@ if [[ "$(uname -s)" != "Darwin" && "$(uname -s)" != "Linux" ]]; then
     exit 1
 fi
 
-BAZEL_BIN="${BAZEL_BIN:-}"
-if [ -z "${BAZEL_BIN}" ]; then
-    if [ -x ".tools/bazel" ]; then
-        BAZEL_BIN=".tools/bazel"
-    elif command -v bazel >/dev/null 2>&1; then
-        BAZEL_BIN="bazel"
-    elif command -v bazelisk >/dev/null 2>&1; then
-        BAZEL_BIN="bazelisk"
-    else
-        echo "Bazel 7.x is required by the latest ScaNN. Please install bazel or bazelisk, or set BAZEL_BIN."
+BAZEL_DOWNLOAD_VERSION="${BAZEL_DOWNLOAD_VERSION:-}"
+if [ -z "${BAZEL_DOWNLOAD_VERSION}" ] && [ -f ".bazeliskrc" ]; then
+    BAZEL_DOWNLOAD_VERSION="$(awk -F= '/^USE_BAZEL_VERSION=/ {print $2; exit}' .bazeliskrc)"
+fi
+BAZEL_DOWNLOAD_VERSION="${BAZEL_DOWNLOAD_VERSION:-7.6.1}"
+
+bazel_version() {
+    "$1" --version 2>/dev/null | awk '{print $NF; exit}'
+}
+
+bazel_major_version() {
+    bazel_version "$1" | cut -d. -f1
+}
+
+is_bazel_7_or_newer() {
+    local candidate="$1"
+    local major
+    major="$(bazel_major_version "${candidate}")"
+    [[ "${major}" =~ ^[0-9]+$ ]] && [ "${major}" -ge 7 ]
+}
+
+download_bazel() {
+    local os arch platform url tmp_path
+    os="$(uname -s)"
+    arch="$(uname -m)"
+
+    case "${os}" in
+        Darwin) platform="darwin" ;;
+        Linux) platform="linux" ;;
+        *) echo "Only support Linux and MacOS"; exit 1 ;;
+    esac
+
+    case "${arch}" in
+        x86_64|amd64) arch="x86_64" ;;
+        arm64|aarch64) arch="arm64" ;;
+        *) echo "Unsupported architecture for Bazel download: ${arch}"; exit 1 ;;
+    esac
+
+    command -v curl >/dev/null 2>&1 || {
+        echo "curl is required to download Bazel ${BAZEL_DOWNLOAD_VERSION}."
         exit 1
+    }
+
+    mkdir -p .tools
+    url="https://github.com/bazelbuild/bazel/releases/download/${BAZEL_DOWNLOAD_VERSION}/bazel-${BAZEL_DOWNLOAD_VERSION}-${platform}-${arch}"
+    tmp_path=".tools/bazel.${BAZEL_DOWNLOAD_VERSION}.${platform}-${arch}.tmp"
+
+    echo "Downloading Bazel ${BAZEL_DOWNLOAD_VERSION} for ${platform}-${arch}..."
+    curl -fL --retry 3 -o "${tmp_path}" "${url}"
+    chmod +x "${tmp_path}"
+    mv "${tmp_path}" .tools/bazel
+}
+
+BAZEL_BIN="${BAZEL_BIN:-}"
+if [ -n "${BAZEL_BIN}" ]; then
+    if ! is_bazel_7_or_newer "${BAZEL_BIN}"; then
+        echo "Bazel 7.x is required by the latest ScaNN, found $(${BAZEL_BIN} --version 2>/dev/null || echo unknown)."
+        exit 1
+    fi
+else
+    for candidate in .tools/bazel bazel bazelisk; do
+        if command -v "${candidate}" >/dev/null 2>&1 && is_bazel_7_or_newer "${candidate}"; then
+            BAZEL_BIN="${candidate}"
+            break
+        fi
+    done
+
+    if [ -z "${BAZEL_BIN}" ]; then
+        download_bazel
+        BAZEL_BIN=".tools/bazel"
     fi
 fi
 
-BAZEL_VERSION="$(${BAZEL_BIN} --version | awk '{print $2}')"
-BAZEL_MAJOR="${BAZEL_VERSION%%.*}"
-if [ "${BAZEL_MAJOR}" -lt 7 ]; then
-    echo "Bazel 7.x is required by the latest ScaNN, found ${BAZEL_VERSION}."
-    exit 1
-fi
+echo "Using $(${BAZEL_BIN} --version)"
 
 CC_BIN="${CC:-clang}"
 command -v "${CC_BIN}" >/dev/null 2>&1 || { echo >&2 "I require ${CC_BIN} but it's not installed. Aborting."; exit 1; }

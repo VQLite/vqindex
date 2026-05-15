@@ -8,8 +8,11 @@ ScaNN with add/train/search/dump/stats APIs.
 ## Build requirements
 
 VQIndex builds only the ScaNN C++ core and does not require TensorFlow. Latest
-ScaNN requires Bazel 7.x and Clang. `vqindex_py` also needs Python headers from
-the Python selected by `PYTHON_BIN_PATH` or `python3`.
+ScaNN requires Bazel 7.x and Clang. `build.sh` will use `BAZEL_BIN` when set,
+then a local/system Bazel 7.x, and otherwise download Bazel into `.tools/bazel`.
+Override the downloaded version with `BAZEL_DOWNLOAD_VERSION` when needed.
+`vqindex_py` also needs Python headers from the Python selected by
+`PYTHON_BIN_PATH` or `python3`.
 
 ## Build vqindex py
 centos need "-lstdc++fs"
