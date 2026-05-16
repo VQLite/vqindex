@@ -738,8 +738,12 @@ public:
                 asset_path: \"$index_dir/datapoint_to_token.npy\" \n\
             } \n\
             assets { \n\
-                asset_type: AH_DATASET_NPY \n\
-                asset_path: \"$index_dir/hashed_dataset.npy\" \n\
+                asset_type: AH_LEAF_LUT16_PACKED_DATASET_NPY \n\
+                asset_path: \"$index_dir/leaf_lut16_packed_dataset.npy\" \n\
+            } \n\
+            assets { \n\
+                asset_type: AH_LEAF_LUT16_PACKED_META_NPY \n\
+                asset_path: \"$index_dir/leaf_lut16_packed_meta.npy\" \n\
             } \n\
             assets { \n\
                 asset_type: INT8_DATASET_NPY \n\
@@ -768,7 +772,8 @@ public:
     bool CheckIndexFiles(std::string& index_dir)
     {
         std::string index_files[] = { "scann_config.pb", "ah_codebook.pb",
-            "serialized_partitioner.pb", "datapoint_to_token.npy", "hashed_dataset.npy",
+            "serialized_partitioner.pb", "datapoint_to_token.npy",
+            "leaf_lut16_packed_dataset.npy", "leaf_lut16_packed_meta.npy",
             "int8_dataset.npy", "int8_multipliers.npy", "dp_norms.npy" };
 
         bool ret = true;

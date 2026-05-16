@@ -111,6 +111,8 @@ StatusOr<ScannInterface::ScannArtifacts> ScannInterface::LoadArtifacts(
   unique_ptr<FixedLengthDocidCollection> docids;
 
   shared_ptr<DenseDataset<float>> dataset;
+  vector<uint8_t> packed_lut16_data;
+  vector<uint64_t> packed_lut16_meta;
   auto fp = make_shared<PreQuantizedFixedPoint>();
   for (const ScannAsset& asset : assets.assets()) {
     const string_view asset_path = asset.asset_path();
@@ -200,8 +202,52 @@ StatusOr<ScannInterface::ScannArtifacts> ScannInterface::LoadArtifacts(
             std::move(vector_and_shape.first), vector_and_shape.second[0]);
         break;
       }
+      case ScannAsset::AH_LEAF_LUT16_PACKED_DATASET_NPY: {
+        SCANN_ASSIGN_OR_RETURN(auto vector_and_shape,
+                               NumpyToVectorAndShape<uint8_t>(asset_path));
+        packed_lut16_data = std::move(vector_and_shape.first);
+        break;
+      }
+      case ScannAsset::AH_LEAF_LUT16_PACKED_META_NPY: {
+        SCANN_ASSIGN_OR_RETURN(auto vector_and_shape,
+                               NumpyToVectorAndShape<uint64_t>(asset_path));
+        packed_lut16_meta = std::move(vector_and_shape.first);
+        if (packed_lut16_meta.size() % 4 != 0) {
+          return FailedPreconditionError(
+              "Packed LUT16 leaf metadata must have four uint64 values per "
+              "leaf.");
+        }
+        break;
+      }
       default:
         break;
+    }
+  }
+  if (!packed_lut16_data.empty() || !packed_lut16_meta.empty()) {
+    if (packed_lut16_meta.empty()) {
+      return FailedPreconditionError(
+          "Packed LUT16 leaf dataset is present without metadata.");
+    }
+    opts.leaf_packed_lut16_datasets =
+        make_shared<vector<PackedLut16Dataset>>();
+    const size_t n_leaves = packed_lut16_meta.size() / 4;
+    opts.leaf_packed_lut16_datasets->reserve(n_leaves);
+    for (size_t i = 0; i < n_leaves; ++i) {
+      const uint64_t offset = packed_lut16_meta[4 * i + 0];
+      const uint64_t size = packed_lut16_meta[4 * i + 1];
+      const uint64_t num_datapoints = packed_lut16_meta[4 * i + 2];
+      const uint64_t num_blocks = packed_lut16_meta[4 * i + 3];
+      if (offset + size > packed_lut16_data.size()) {
+        return FailedPreconditionError(
+            "Packed LUT16 leaf metadata references bytes outside the packed "
+            "dataset.");
+      }
+      PackedLut16Dataset packed;
+      packed.bit_packed_data.assign(packed_lut16_data.begin() + offset,
+                                    packed_lut16_data.begin() + offset + size);
+      packed.num_datapoints = num_datapoints;
+      packed.num_blocks = num_blocks;
+      opts.leaf_packed_lut16_datasets->push_back(std::move(packed));
     }
   }
   if (fp->fixed_point_dataset != nullptr) {
@@ -607,6 +653,30 @@ StatusOr<ScannAssets> ScannInterface::Serialize(std::string path,
       add_asset(rpath, ScannAsset::AH_DATASET_SOAR_NPY);
       SCANN_RETURN_IF_ERROR(DatasetToNumpy(fpath, *(opts.soar_hashed_dataset)));
     }
+  }
+  if (opts.leaf_packed_lut16_datasets != nullptr &&
+      !opts.leaf_packed_lut16_datasets->empty()) {
+    vector<uint8_t> packed_data;
+    vector<uint64_t> packed_meta;
+    packed_meta.reserve(opts.leaf_packed_lut16_datasets->size() * 4);
+    for (const PackedLut16Dataset& leaf : *opts.leaf_packed_lut16_datasets) {
+      packed_meta.push_back(packed_data.size());
+      packed_meta.push_back(leaf.bit_packed_data.size());
+      packed_meta.push_back(leaf.num_datapoints);
+      packed_meta.push_back(leaf.num_blocks);
+      packed_data.insert(packed_data.end(), leaf.bit_packed_data.begin(),
+                         leaf.bit_packed_data.end());
+    }
+    auto [data_rpath, data_fpath] =
+        convert_path("leaf_lut16_packed_dataset.npy");
+    add_asset(data_rpath, ScannAsset::AH_LEAF_LUT16_PACKED_DATASET_NPY);
+    SCANN_RETURN_IF_ERROR(VectorToNumpy(data_fpath, packed_data));
+
+    auto [meta_rpath, meta_fpath] = convert_path("leaf_lut16_packed_meta.npy");
+    add_asset(meta_rpath, ScannAsset::AH_LEAF_LUT16_PACKED_META_NPY);
+    SCANN_RETURN_IF_ERROR(
+        VectorToNumpy(meta_fpath, packed_meta,
+                      {opts.leaf_packed_lut16_datasets->size(), 4}));
   }
   if (opts.bfloat16_dataset != nullptr) {
     auto [rpath, fpath] = convert_path("bfloat16_dataset.npy");

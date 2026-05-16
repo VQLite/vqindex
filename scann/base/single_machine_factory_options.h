@@ -40,6 +40,12 @@ template <typename T>
 class SingleMachineSearcherBase;
 class ScannConfig;
 
+struct PackedLut16Dataset {
+  std::vector<uint8_t> bit_packed_data;
+  DatapointIndex num_datapoints = 0;
+  uint32_t num_blocks = 0;
+};
+
 struct SingleMachineFactoryOptions {
   SingleMachineFactoryOptions() = default;
 
@@ -55,6 +61,10 @@ struct SingleMachineFactoryOptions {
   shared_ptr<DenseDataset<uint8_t>> hashed_dataset;
 
   shared_ptr<DenseDataset<uint8_t>> soar_hashed_dataset;
+
+  shared_ptr<PackedLut16Dataset> packed_lut16_dataset;
+
+  shared_ptr<vector<PackedLut16Dataset>> leaf_packed_lut16_datasets;
 
   shared_ptr<DenseDataset<int16_t>> bfloat16_dataset;
 

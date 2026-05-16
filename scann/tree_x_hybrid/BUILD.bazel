@@ -122,6 +122,7 @@ cc_library(
         "//scann/base:single_machine_base",
         "//scann/data_format:datapoint",
         "//scann/data_format:dataset",
+        "//scann/data_format:docid_collection_interface",
         "//scann/distance_measures",
         "//scann/distance_measures/one_to_one:l2_distance",
         "//scann/hashes/asymmetric_hashing2:indexing",

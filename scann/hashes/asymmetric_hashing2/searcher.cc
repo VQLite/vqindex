@@ -80,6 +80,31 @@ std::shared_ptr<DenseDataset<uint8_t>> PreprocessHashedDataset(
   }
   return hashed_dataset;
 }
+
+void SetLut16BatchSizing(const PackedDataset& packed_dataset,
+                         uint8_t* optimal_low_level_batch_size,
+                         uint8_t* max_low_level_batch_size) {
+  const size_t l2_cache_bytes = 256 * 1024;
+  if (packed_dataset.bit_packed_data.size() <= l2_cache_bytes / 2) {
+    *optimal_low_level_batch_size = 3;
+    *max_low_level_batch_size = 3;
+    return;
+  }
+
+  if (RuntimeSupportsAvx2()) {
+    *optimal_low_level_batch_size = packed_dataset.num_blocks <= 300 ? 7 : 5;
+  } else {
+    *optimal_low_level_batch_size = packed_dataset.num_blocks <= 300 ? 6 : 5;
+  }
+}
+
+PackedDataset ToPackedDataset(PackedLut16Dataset packed_lut16_dataset) {
+  PackedDataset result;
+  result.bit_packed_data = std::move(packed_lut16_dataset.bit_packed_data);
+  result.num_datapoints = packed_lut16_dataset.num_datapoints;
+  result.num_blocks = packed_lut16_dataset.num_blocks;
+  return result;
+}
 }  // namespace
 
 template <typename T>
@@ -107,26 +132,8 @@ SearcherBase<T>::SearcherBase(
     packed_dataset_ =
         ::research_scann::asymmetric_hashing2::CreatePackedDataset(
             *this->hashed_dataset());
-
-    const size_t l2_cache_bytes = 256 * 1024;
-    if (packed_dataset_.bit_packed_data.size() <= l2_cache_bytes / 2) {
-      optimal_low_level_batch_size_ = 3;
-      max_low_level_batch_size_ = 3;
-    } else {
-      if (RuntimeSupportsAvx2()) {
-        if (packed_dataset_.num_blocks <= 300) {
-          optimal_low_level_batch_size_ = 7;
-        } else {
-          optimal_low_level_batch_size_ = 5;
-        }
-      } else {
-        if (packed_dataset_.num_blocks <= 300) {
-          optimal_low_level_batch_size_ = 6;
-        } else {
-          optimal_low_level_batch_size_ = 5;
-        }
-      }
-    }
+    SetLut16BatchSizing(packed_dataset_, &optimal_low_level_batch_size_,
+                        &max_low_level_batch_size_);
   }
 
   if (opts_.quantization_scheme() == AsymmetricHasherConfig::PRODUCT_AND_BIAS) {
@@ -153,6 +160,31 @@ SearcherBase<T>::SearcherBase(
           static_cast<float>(norm == 0 ? 0 : 1 / sqrt(norm)));
     }
   }
+}
+
+template <typename T>
+SearcherBase<T>::SearcherBase(
+    std::shared_ptr<TypedDataset<T>> dataset,
+    PackedLut16Dataset packed_lut16_dataset, SearcherOptions<T> opts,
+    int32_t default_pre_reordering_num_neighbors,
+    float default_pre_reordering_epsilon)
+    : SingleMachineSearcherBase<T>(
+          std::move(dataset), nullptr, default_pre_reordering_num_neighbors,
+          default_pre_reordering_epsilon),
+      opts_(std::move(opts)),
+      limited_inner_product_(
+          (opts_.asymmetric_queryer_ &&
+           typeid(*opts_.asymmetric_queryer_->lookup_distance()) ==
+               typeid(const LimitedInnerProductDistance))),
+      lut16_(opts_.asymmetric_lookup_type_ ==
+                 AsymmetricHasherConfig::INT8_LUT16 &&
+             opts_.asymmetric_queryer_) {
+  DCHECK(lut16_);
+  DCHECK_EQ(opts_.asymmetric_queryer_->num_blocks(),
+            packed_lut16_dataset.num_blocks);
+  packed_dataset_ = ToPackedDataset(std::move(packed_lut16_dataset));
+  SetLut16BatchSizing(packed_dataset_, &optimal_low_level_batch_size_,
+                      &max_low_level_batch_size_);
 }
 
 template <typename T>
@@ -197,6 +229,16 @@ Searcher<T>::Searcher(std::shared_ptr<TypedDataset<T>> dataset,
                       float default_pre_reordering_epsilon)
     : SearcherBase<T>(dataset, hashed_dataset, opts,
                       default_pre_reordering_num_neighbors,
+                      default_pre_reordering_epsilon) {}
+
+template <typename T>
+Searcher<T>::Searcher(std::shared_ptr<TypedDataset<T>> dataset,
+                      PackedLut16Dataset packed_lut16_dataset,
+                      SearcherOptions<T> opts,
+                      int32_t default_pre_reordering_num_neighbors,
+                      float default_pre_reordering_epsilon)
+    : SearcherBase<T>(std::move(dataset), std::move(packed_lut16_dataset),
+                      std::move(opts), default_pre_reordering_num_neighbors,
                       default_pre_reordering_epsilon) {}
 
 template <typename T>
@@ -484,8 +526,10 @@ Searcher<T>::ExtractSingleMachineFactoryOptions() {
         DatasetSpanToCentersProto(centers, this->opts_.quantization_scheme());
     if (this->opts_.asymmetric_lookup_type_ ==
         AsymmetricHasherConfig::INT8_LUT16)
-      opts.hashed_dataset = make_shared<DenseDataset<uint8_t>>(
-          UnpackDataset(CreatePackedDatasetView(this->packed_dataset_)));
+      opts.packed_lut16_dataset = make_shared<PackedLut16Dataset>(
+          PackedLut16Dataset{this->packed_dataset_.bit_packed_data,
+                             this->packed_dataset_.num_datapoints,
+                             this->packed_dataset_.num_blocks});
   }
   return opts;
 }

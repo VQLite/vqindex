@@ -39,6 +39,8 @@ message ScannAsset {
     INT8_MULTIPLIERS_NPY = 13;
     INT8_NORMS_NPY = 14;
     BF16_DATASET_NPY = 15;
+    AH_LEAF_LUT16_PACKED_DATASET_NPY = 17;
+    AH_LEAF_LUT16_PACKED_META_NPY = 18;
   }
 
   AssetType asset_type = 1;

@@ -67,6 +67,8 @@ class TreeAHHybridResidual final : public SingleMachineSearcherBase<float> {
 
     const DenseDataset<uint8_t>* soar_hashed_dataset = nullptr;
 
+    const vector<PackedLut16Dataset>* leaf_packed_lut16_datasets = nullptr;
+
     ThreadPool* pool = nullptr;
   };
 

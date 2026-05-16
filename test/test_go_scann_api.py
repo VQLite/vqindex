@@ -220,6 +220,9 @@ def main() -> None:
         assert (index_dir / "vids.vql").exists()
         assert (index_dir / "index" / "scann_config.pb").exists()
         assert (index_dir / "index" / "scann_assets.pbtxt").exists()
+        assert (index_dir / "index" / "leaf_lut16_packed_dataset.npy").exists()
+        assert (index_dir / "index" / "leaf_lut16_packed_meta.npy").exists()
+        assert not (index_dir / "index" / "hashed_dataset.npy").exists()
 
         lib.vqindex_release(handler)
         handler = init_index(lib, index_dir, dim)

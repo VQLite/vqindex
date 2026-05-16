@@ -122,6 +122,12 @@ class SearcherBase : public SingleMachineSearcherBase<T> {
                         int32_t default_pre_reordering_num_neighbors,
                         float default_pre_reordering_epsilon);
 
+  explicit SearcherBase(std::shared_ptr<TypedDataset<T>> dataset,
+                        PackedLut16Dataset packed_lut16_dataset,
+                        SearcherOptions<T> opts,
+                        int32_t default_pre_reordering_num_neighbors,
+                        float default_pre_reordering_epsilon);
+
   explicit SearcherBase(SearcherOptions<T> opts,
                         int32_t default_pre_reordering_num_neighbors,
                         float default_pre_reordering_epsilon);
@@ -174,6 +180,11 @@ class Searcher final : public SearcherBase<T> {
   Searcher(std::shared_ptr<TypedDataset<T>> dataset,
            std::shared_ptr<DenseDataset<uint8_t>> hashed_dataset,
            SearcherOptions<T> opts,
+           int32_t default_pre_reordering_num_neighbors,
+           float default_pre_reordering_epsilon);
+
+  Searcher(std::shared_ptr<TypedDataset<T>> dataset,
+           PackedLut16Dataset packed_lut16_dataset, SearcherOptions<T> opts,
            int32_t default_pre_reordering_num_neighbors,
            float default_pre_reordering_epsilon);
 

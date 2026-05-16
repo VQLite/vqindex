@@ -370,8 +370,7 @@ StatusOrSearcherUntyped TreeAhHybridResidualFactory<float>(
         "centers_filename or database_wildcard must be provided.");
   }
 
-  if (!dense) {
-    DCHECK(opts->hashed_dataset);
+  if (!dense && opts->hashed_dataset) {
     SCANN_RETURN_IF_ERROR(result->set_docids(opts->hashed_dataset->docids()));
   }
 
@@ -390,6 +389,7 @@ StatusOrSearcherUntyped TreeAhHybridResidualFactory<float>(
       std::move(ah_model), std::move(datapoints_by_token),
       {.hashed_dataset = opts->hashed_dataset.get(),
        .soar_hashed_dataset = opts->soar_hashed_dataset.get(),
+       .leaf_packed_lut16_datasets = opts->leaf_packed_lut16_datasets.get(),
        .pool = opts->parallelization_pool.get()}));
   opts->datapoints_by_token = nullptr;
   SCANN_RETURN_IF_ERROR(

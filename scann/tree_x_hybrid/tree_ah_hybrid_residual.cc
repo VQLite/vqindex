@@ -32,6 +32,7 @@
 #include "scann/base/search_parameters.h"
 #include "scann/base/single_machine_base.h"
 #include "scann/data_format/dataset.h"
+#include "scann/data_format/docid_collection_interface.h"
 #include "scann/distance_measures/distance_measure_factory.h"
 #include "scann/distance_measures/one_to_one/l2_distance.h"
 #include "scann/hashes/asymmetric_hashing2/indexing.h"
@@ -59,6 +60,84 @@
 namespace research_scann {
 
 using asymmetric_hashing2::AsymmetricHashingOptionalParameters;
+
+namespace {
+
+class SizeOnlyDocidCollection final : public DocidCollectionInterface {
+ public:
+  explicit SizeOnlyDocidCollection(size_t size) : size_(size) {}
+
+  Status Append(string_view docid) final {
+    return FailedPreconditionError("SizeOnlyDocidCollection is immutable.");
+  }
+
+  size_t size() const final { return size_; }
+  bool empty() const final { return size_ == 0; }
+  string_view Get(size_t i) const final { return string_view(); }
+
+  void MultiGet(size_t num_docids, DpIdxGetter docid_idx_getter,
+                StringSetter docid_setter) const final {
+    for (size_t i : Seq(num_docids)) {
+      docid_setter(i, string_view());
+    }
+  }
+
+  size_t capacity() const final { return size_; }
+  size_t MemoryUsage() const final { return sizeof(*this); }
+  void Clear() final { size_ = 0; }
+  void Reserve(DatapointIndex n_elements) final {}
+  void ShrinkToFit() final {}
+
+  unique_ptr<DocidCollectionInterface> Copy() const final {
+    return make_unique<SizeOnlyDocidCollection>(size_);
+  }
+
+  class SizeOnlyMutator final : public DocidCollectionInterface::Mutator {
+   public:
+    explicit SizeOnlyMutator(size_t* size) : size_(size) {}
+
+    Status AddDatapoint(string_view docid) final {
+      ++(*size_);
+      return OkStatus();
+    }
+
+    Status RemoveDatapoint(string_view docid) final {
+      return FailedPreconditionError(
+          "SizeOnlyDocidCollection cannot remove by docid.");
+    }
+
+    void Reserve(size_t size) final {}
+
+    Status RemoveDatapoint(DatapointIndex idx) final {
+      if (idx >= *size_) return OutOfRangeError("Datapoint index out of range.");
+      --(*size_);
+      return OkStatus();
+    }
+
+    bool LookupDatapointIndex(string_view docid,
+                              DatapointIndex* idx) const final {
+      return false;
+    }
+
+    string_view ImplName() const final { return "SizeOnlyDocidCollection"; }
+
+   private:
+    size_t* size_;
+  };
+
+  StatusOr<Mutator*> GetMutator() const final {
+    if (!mutator_) {
+      mutator_ = make_unique<SizeOnlyMutator>(&size_);
+    }
+    return mutator_.get();
+  }
+
+ private:
+  mutable size_t size_;
+  mutable unique_ptr<SizeOnlyMutator> mutator_;
+};
+
+}  // namespace
 
 Status TreeAHHybridResidual::EnableCrowdingImpl(
     ConstSpan<int64_t> datapoint_index_to_crowding_attribute,
@@ -364,6 +443,20 @@ Status TreeAHHybridResidual::BuildLeafSearchers(
 
   const DenseDataset<uint8_t>* hashed_dataset = opts.hashed_dataset;
   const DenseDataset<uint8_t>* soar_hashed_dataset = opts.soar_hashed_dataset;
+  const vector<PackedLut16Dataset>* leaf_packed_lut16_datasets =
+      opts.leaf_packed_lut16_datasets;
+  if (leaf_packed_lut16_datasets) {
+    if (lookup_type_tag_ != AsymmetricHasherConfig::INT8_LUT16) {
+      return InvalidArgumentError(
+          "Packed leaf AH artifacts are only valid for INT8_LUT16.");
+    }
+    if (leaf_packed_lut16_datasets->size() != datapoints_by_token.size()) {
+      return InvalidArgumentError(
+          "Packed leaf AH artifact count (%d) does not match partition count "
+          "(%d).",
+          leaf_packed_lut16_datasets->size(), datapoints_by_token.size());
+    }
+  }
   if (hashed_dataset && !soar_hashed_dataset &&
       !datapoints_by_token_disjoint_) {
     return InvalidArgumentError(
@@ -376,7 +469,15 @@ Status TreeAHHybridResidual::BuildLeafSearchers(
               partitioner.get())) {
     partitioning_projection = projecting_decorator->projection();
   }
-  if (hashed_dataset) {
+  if (leaf_packed_lut16_datasets) {
+    get_hashed_datapoint =
+        [](DatapointIndex i, int32_t token,
+           Datapoint<uint8_t>* storage) -> StatusOr<DatapointPtr<uint8_t>> {
+      return InvalidArgumentError(
+          "Hashed datapoints are unavailable when loading packed LUT16 "
+          "leaf artifacts.");
+    };
+  } else if (hashed_dataset) {
     if (datapoints_by_token_disjoint_) {
       get_hashed_datapoint = [hashed_dataset](DatapointIndex i, int32_t token,
                                               Datapoint<uint8_t>* storage)
@@ -445,25 +546,41 @@ Status TreeAHHybridResidual::BuildLeafSearchers(
 
   auto build_leaf_for_token = [&](size_t token) -> Status {
     const absl::Time token_start = absl::Now();
-    auto hashed_partition = make_unique<DenseDataset<uint8_t>>();
-    if (asymmetric_queryer_->quantization_scheme() ==
-        AsymmetricHasherConfig::PRODUCT_AND_PACK) {
-      hashed_partition->set_packing_strategy(HashedItem::NIBBLE);
-    }
-    Datapoint<uint8_t> dp;
-    Datapoint<uint8_t> hashed_storage;
-    for (DatapointIndex dp_index : datapoints_by_token[token]) {
-      auto status_or_hashed_dptr =
-          get_hashed_datapoint(dp_index, token, &hashed_storage);
-      SCANN_ASSIGN_OR_RETURN(auto hashed_dptr, status_or_hashed_dptr);
-      auto local_status = hashed_partition->Append(hashed_dptr, "");
-      SCANN_RETURN_IF_ERROR(local_status);
-    }
+    if (leaf_packed_lut16_datasets) {
+      const PackedLut16Dataset& packed =
+          leaf_packed_lut16_datasets->at(token);
+      if (packed.num_datapoints != datapoints_by_token[token].size()) {
+        return InvalidArgumentError(
+            "Packed leaf AH artifact %d has %d datapoints, expected %d.",
+            token, packed.num_datapoints, datapoints_by_token[token].size());
+      }
+      leaf_searchers_[token] =
+          make_unique<asymmetric_hashing2::Searcher<float>>(
+              nullptr, packed, *searcher_options_,
+              default_pre_reordering_num_neighbors(),
+              default_pre_reordering_epsilon());
+    } else {
+      auto hashed_partition = make_unique<DenseDataset<uint8_t>>();
+      if (asymmetric_queryer_->quantization_scheme() ==
+          AsymmetricHasherConfig::PRODUCT_AND_PACK) {
+        hashed_partition->set_packing_strategy(HashedItem::NIBBLE);
+      }
+      Datapoint<uint8_t> dp;
+      Datapoint<uint8_t> hashed_storage;
+      for (DatapointIndex dp_index : datapoints_by_token[token]) {
+        auto status_or_hashed_dptr =
+            get_hashed_datapoint(dp_index, token, &hashed_storage);
+        SCANN_ASSIGN_OR_RETURN(auto hashed_dptr, status_or_hashed_dptr);
+        auto local_status = hashed_partition->Append(hashed_dptr, "");
+        SCANN_RETURN_IF_ERROR(local_status);
+      }
 
-    leaf_searchers_[token] = make_unique<asymmetric_hashing2::Searcher<float>>(
-        nullptr, std::move(hashed_partition), *searcher_options_,
-        default_pre_reordering_num_neighbors(),
-        default_pre_reordering_epsilon());
+      leaf_searchers_[token] =
+          make_unique<asymmetric_hashing2::Searcher<float>>(
+              nullptr, std::move(hashed_partition), *searcher_options_,
+              default_pre_reordering_num_neighbors(),
+              default_pre_reordering_epsilon());
+    }
     if (!leaf_searchers_[token]->needs_hashed_dataset()) {
       leaf_searchers_[token]->ReleaseHashedDataset();
     }
@@ -478,6 +595,11 @@ Status TreeAHHybridResidual::BuildLeafSearchers(
       IndicesOf(datapoints_by_token), opts.pool, build_leaf_for_token));
 
   datapoints_by_token_ = std::move(datapoints_by_token);
+  if (leaf_packed_lut16_datasets && !this->dataset() &&
+      !this->hashed_dataset()) {
+    SCANN_RETURN_IF_ERROR(
+        this->set_docids(make_shared<SizeOnlyDocidCollection>(num_datapoints_)));
+  }
   leaf_tokens_by_norm_ = OrderLeafTokensByCenterNorm(*partitioner);
   partitioner->set_tokenization_mode(UntypedPartitioner::QUERY);
   query_tokenizer_ = std::move(partitioner);
@@ -1113,12 +1235,6 @@ TreeAHHybridResidual::ExtractSingleMachineFactoryOptions() {
   SCANN_ASSIGN_OR_RETURN(const int dataset_size,
                          UntypedSingleMachineSearcherBase::DatasetSize());
   SCANN_ASSIGN_OR_RETURN(
-      SingleMachineFactoryOptions leaf_opts,
-      MergeAHLeafOptions(leaf_searchers_, datapoints_by_token_, dataset_size,
-                         datapoints_by_token_disjoint_
-                             ? 1.0f
-                             : spilling_overretrieve_factor_));
-  SCANN_ASSIGN_OR_RETURN(
       auto opts,
       SingleMachineSearcherBase<float>::ExtractSingleMachineFactoryOptions());
   opts.datapoints_by_token =
@@ -1127,10 +1243,41 @@ TreeAHHybridResidual::ExtractSingleMachineFactoryOptions() {
   opts.serialized_partitioner = std::make_shared<SerializedPartitioner>();
   query_tokenizer_->CopyToProto(opts.serialized_partitioner.get());
 
-  if (leaf_opts.ah_codebook != nullptr) {
-    opts.ah_codebook = leaf_opts.ah_codebook;
-    opts.hashed_dataset = leaf_opts.hashed_dataset;
-    opts.soar_hashed_dataset = leaf_opts.soar_hashed_dataset;
+  vector<SingleMachineFactoryOptions> leaf_opts(leaf_searchers_.size());
+  bool all_leaves_have_packed_lut16 = !leaf_searchers_.empty();
+  for (size_t i : IndicesOf(leaf_searchers_)) {
+    SCANN_ASSIGN_OR_RETURN(
+        auto cur_leaf_opts,
+        leaf_searchers_[i]->ExtractSingleMachineFactoryOptions());
+    leaf_opts[i] = std::move(cur_leaf_opts);
+    all_leaves_have_packed_lut16 =
+        all_leaves_have_packed_lut16 &&
+        leaf_opts[i].packed_lut16_dataset != nullptr;
+  }
+
+  if (all_leaves_have_packed_lut16) {
+    opts.leaf_packed_lut16_datasets =
+        make_shared<vector<PackedLut16Dataset>>();
+    opts.leaf_packed_lut16_datasets->reserve(leaf_opts.size());
+    for (const SingleMachineFactoryOptions& leaf_opt : leaf_opts) {
+      opts.leaf_packed_lut16_datasets->push_back(
+          *leaf_opt.packed_lut16_dataset);
+    }
+    opts.ah_codebook = leaf_opts[0].ah_codebook;
+  } else {
+    MutableSpan<SingleMachineFactoryOptions> leaf_opts_span(
+        leaf_opts.data(), leaf_opts.size());
+    SCANN_ASSIGN_OR_RETURN(
+        SingleMachineFactoryOptions merged_leaf_opts,
+        tree_ah_utils_internal::FinishMergeAHLeafOptions(
+            leaf_opts_span, datapoints_by_token_, dataset_size,
+            datapoints_by_token_disjoint_ ? 1.0f
+                                          : spilling_overretrieve_factor_));
+    if (merged_leaf_opts.ah_codebook != nullptr) {
+      opts.ah_codebook = merged_leaf_opts.ah_codebook;
+      opts.hashed_dataset = merged_leaf_opts.hashed_dataset;
+      opts.soar_hashed_dataset = merged_leaf_opts.soar_hashed_dataset;
+    }
   }
   return opts;
 }
