@@ -130,6 +130,11 @@ cc_binary(
     tags = ["local"],
     deps = [
         ":scann",
+        "//scann/proto:auto_tuning_cc_proto",
+        "//scann/proto:partitioning_cc_proto",
+        "//scann/proto:scann_cc_proto",
+        "//scann/utils:single_machine_autopilot",
+        "@com_google_protobuf//:protobuf",
     ],
 )
 
@@ -155,6 +160,11 @@ cc_binary(
     tags = ["local"],
     deps = [
         ":scann",
+        "//scann/proto:auto_tuning_cc_proto",
+        "//scann/proto:partitioning_cc_proto",
+        "//scann/proto:scann_cc_proto",
+        "//scann/utils:single_machine_autopilot",
+        "@com_google_protobuf//:protobuf",
         "@rules_python//python/cc:current_py_cc_headers",
     ],
 )

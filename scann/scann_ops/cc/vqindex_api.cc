@@ -31,6 +31,10 @@
 #include<sys/wait.h>
 
 #include "scann/scann_ops/cc/scann.h"
+#include "scann/proto/auto_tuning.pb.h"
+#include "scann/proto/partitioning.pb.h"
+#include "scann/proto/scann.pb.h"
+#include "scann/utils/single_machine_autopilot.h"
 #include "scann/utils/io_oss_wrapper.h"
 
 using namespace research_scann;
@@ -186,6 +190,12 @@ public:
         LOG(INFO) << "TrainImpl Unavailable";
         return 0;
     }
+    ret_code_t Rebalance(const char* config_pbtxt, int32_t nthreads);
+    virtual int RebalanceImpl(const std::string& config_pbtxt, int32_t nthreads)
+    {
+        LOG(INFO) << "RebalanceImpl Unavailable";
+        return 0;
+    }
 
     ret_code_t Dump();
     ret_code_t DoDump();
@@ -209,6 +219,13 @@ public:
     virtual size_t GetIndexPointsNum() = 0;
 
     virtual bool IsBrute() { return false; }
+    virtual ret_code_t SetTuning(index_tuning_config_t tuning) { return RET_CODE_INDEXERR; }
+    virtual ret_code_t SuggestConfig(uint64_t dataset_size, uint32_t nlist, std::string& config)
+    {
+        return RET_CODE_INDEXERR;
+    }
+    virtual ret_code_t InitializeHealthStats() { return RET_CODE_INDEXERR; }
+    virtual ret_code_t GetHealthStats(index_health_stats_t& stats) { return RET_CODE_INDEXERR; }
 
 protected:
     ret_code_t AddDatasetsMemory(const float* datasets, uint64_t len, const int64_t* vids);
@@ -575,6 +592,41 @@ ret_code_t VQLiteIndex::TrainProcess(train_type_t train_type, uint32_t nlist, in
     return ret;
 }
 
+ret_code_t VQLiteIndex::Rebalance(const char* config_pbtxt, int32_t nthreads)
+{
+    if (current_state_ > INDEX_STATE_READY || current_state_ < INDEX_STATE_READY) {
+        LOG(INFO) << "current_state_=" << current_state_;
+        return RET_CODE_NOREADY;
+    }
+
+    std::lock_guard<std::mutex> guard(mutex_global_lock_);
+
+    current_state_ = INDEX_STATE_TRAIN;
+
+    while (current_search_n_ > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        LOG(INFO) << "wait search = " << current_search_n_;
+    }
+
+    std::string config;
+    if (config_pbtxt != NULL) {
+        config = config_pbtxt;
+    }
+
+    ret_code_t ret = RET_CODE_OK;
+    if (RebalanceImpl(config, nthreads) != 0) {
+        ret = RET_CODE_INDEXERR;
+    }
+
+    if (GetIndexPointsNum() > 0) {
+        current_state_ = INDEX_STATE_READY;
+    } else {
+        current_state_ = INDEX_STATE_NOINDEX;
+    }
+
+    return ret;
+}
+
 ret_code_t VQLiteIndex::DoDump()
 {
     std::error_code ec;
@@ -694,6 +746,13 @@ public:
         , topk_(30)
         , reorder_topk_(256)
         , nprobe_(128)
+        , use_autopilot_(false)
+        , enable_soar_(false)
+        , autopilot_reordering_dtype_(AutopilotTreeAH::INT8)
+        , soar_lambda_(1.5f)
+        , soar_overretrieve_factor_(2.0f)
+        , autopilot_l1_size_(32768)
+        , autopilot_l3_size_(33554432)
         , is_brute_(false)
     {
         if (partitioning_train_sample_rate_ < 0 || partitioning_train_sample_rate_ > 1) {
@@ -702,6 +761,49 @@ public:
         if (hash_train_sample_rate_ < 0 || hash_train_sample_rate_ > 1) {
             hash_train_sample_rate_ = 0.1;
         }
+    }
+
+    uint32_t DefaultNlist(uint64_t npoints)
+    {
+        uint32_t nlist = pow(2, ceil(log(sqrt(npoints)) / log(2)));
+        if (nlist < 2) {
+            nlist = 2;
+        }
+        return nlist;
+    }
+
+    ret_code_t SetTuning(index_tuning_config_t tuning) override
+    {
+        if (tuning.topk_ > 0) {
+            topk_ = tuning.topk_;
+        }
+        if (tuning.reorder_topk_ > 0) {
+            reorder_topk_ = tuning.reorder_topk_;
+        }
+        if (tuning.nprobe_ > 0) {
+            nprobe_ = tuning.nprobe_;
+        }
+        use_autopilot_ = tuning.use_autopilot_ != 0;
+        enable_soar_ = tuning.enable_soar_ != 0;
+        if (tuning.autopilot_reordering_dtype_ == AutopilotTreeAH::BFLOAT16 ||
+            tuning.autopilot_reordering_dtype_ == AutopilotTreeAH::INT8 ||
+            tuning.autopilot_reordering_dtype_ == AutopilotTreeAH::FLOAT32) {
+            autopilot_reordering_dtype_ = tuning.autopilot_reordering_dtype_;
+        }
+        if (tuning.soar_lambda_ > 0.0f) {
+            soar_lambda_ = tuning.soar_lambda_;
+        }
+        if (tuning.soar_overretrieve_factor_ >= 1.0f &&
+            tuning.soar_overretrieve_factor_ <= 2.0f) {
+            soar_overretrieve_factor_ = tuning.soar_overretrieve_factor_;
+        }
+        if (tuning.autopilot_l1_size_ > 0) {
+            autopilot_l1_size_ = tuning.autopilot_l1_size_;
+        }
+        if (tuning.autopilot_l3_size_ > 0) {
+            autopilot_l3_size_ = tuning.autopilot_l3_size_;
+        }
+        return RET_CODE_OK;
     }
 
     ~VQLiteIndexScann()
@@ -800,7 +902,7 @@ public:
         return ret;
     }
 
-    std::string GetScannConfig(uint64_t datasets_train_size, uint32_t nlist)
+    std::string GetManualScannConfig(uint64_t datasets_train_size, uint32_t nlist)
     {
         LOG(INFO) << datasets_train_size << ": " << brute_threshold_;
         is_brute_ = false;
@@ -887,13 +989,100 @@ public:
         return std::string(buf.get(), buf.get() + size - 1);
     }
 
+    bool ApplySoarToConfig(ScannConfig& config)
+    {
+        if (!enable_soar_ || !config.has_partitioning()) {
+            return true;
+        }
+        auto* database_spilling =
+            config.mutable_partitioning()->mutable_database_spilling();
+        database_spilling->set_spilling_type(DatabaseSpillingConfig::SOAR);
+        database_spilling->set_orthogonality_amplification_lambda(soar_lambda_);
+        database_spilling->set_overretrieve_factor(soar_overretrieve_factor_);
+        return true;
+    }
+
+    std::string GetAutopilotScannConfig(uint64_t datasets_train_size, uint32_t nlist)
+    {
+        is_brute_ = false;
+        if (datasets_train_size < brute_threshold_) {
+            return GetManualScannConfig(datasets_train_size, nlist);
+        }
+
+        ScannConfig config;
+        config.set_num_neighbors(topk_);
+        config.mutable_distance_measure()->set_distance_measure("DotProductDistance");
+        auto* tree_ah = config.mutable_autopilot()->mutable_tree_ah();
+        tree_ah->set_reordering_dtype(
+            static_cast<AutopilotTreeAH::DataType>(autopilot_reordering_dtype_));
+        tree_ah->set_l1_size(autopilot_l1_size_);
+        tree_ah->set_l3_size(autopilot_l3_size_);
+        if (nlist > 0) {
+            tree_ah->set_num_leaf_partitions(nlist);
+        }
+
+        StatusOr<ScannConfig> tuned =
+            Autopilot(config, nullptr, datasets_train_size, dim_);
+        if (!tuned.ok()) {
+            LOG(INFO) << "Autopilot failed: " << tuned.status().message();
+            return std::string();
+        }
+        ApplySoarToConfig(*tuned);
+        tuned->clear_autopilot();
+
+        std::string ret_config;
+        if (!google::protobuf::TextFormat::PrintToString(*tuned, &ret_config)) {
+            return std::string();
+        }
+        return ret_config;
+    }
+
+    std::string GetScannConfig(uint64_t datasets_train_size, uint32_t nlist)
+    {
+        std::string config_text = use_autopilot_
+            ? GetAutopilotScannConfig(datasets_train_size, nlist)
+            : GetManualScannConfig(datasets_train_size, nlist);
+        if (config_text.empty() || !enable_soar_) {
+            return config_text;
+        }
+
+        ScannConfig config;
+        if (!google::protobuf::TextFormat::ParseFromString(config_text, &config)) {
+            return std::string();
+        }
+        ApplySoarToConfig(config);
+        std::string ret_config;
+        if (!google::protobuf::TextFormat::PrintToString(config, &ret_config)) {
+            return std::string();
+        }
+        return ret_config;
+    }
+
+    ret_code_t SuggestConfig(uint64_t dataset_size, uint32_t nlist, std::string& config) override
+    {
+        if (dataset_size == 0) {
+            dataset_size = datasets_npoints_;
+        }
+        if (dataset_size == 0) {
+            return RET_CODE_DATAERR;
+        }
+        if (nlist == 0) {
+            nlist = DefaultNlist(dataset_size);
+        }
+        config = GetScannConfig(dataset_size, nlist);
+        return config.empty() ? RET_CODE_INDEXERR : RET_CODE_OK;
+    }
+
     bool InitImpl(std::string& index_dir) override;
     int AddImpl(std::vector<float>& datasets, uint64_t npoints, int32_t nthreads) override;
     int TrainImpl(
         std::vector<float>& datasets, uint64_t npoints, uint32_t nlist, int32_t nthreads) override;
+    int RebalanceImpl(const std::string& config_pbtxt, int32_t nthreads) override;
     int DumpImpl(std::string& index_dir) override;
     int SearchImpl(const float* queries, int32_t npoints, std::vector<result_search_t>& res,
         params_search_t params) override;
+    ret_code_t InitializeHealthStats() override;
+    ret_code_t GetHealthStats(index_health_stats_t& stats) override;
 
     size_t GetIndexPointsNum()
     {
@@ -929,6 +1118,13 @@ private:
     uint32_t nprobe_; // default leaves_to_search
     float partitioning_train_sample_rate_; // default 0.2
     float hash_train_sample_rate_; // default 0.1
+    bool use_autopilot_;
+    bool enable_soar_;
+    uint32_t autopilot_reordering_dtype_;
+    float soar_lambda_;
+    float soar_overretrieve_factor_;
+    uint64_t autopilot_l1_size_;
+    uint64_t autopilot_l3_size_;
     bool is_brute_;
 };
 
@@ -983,10 +1179,7 @@ int VQLiteIndexScann::TrainImpl(
     }
 
     if (nlist == 0) {
-        nlist = pow(2, ceil(log(sqrt(npoints)) / log(2)));
-        if (nlist < 2) {
-            nlist = 2;
-        }
+        nlist = DefaultNlist(npoints);
     }
     std::string config = GetScannConfig(npoints, nlist);
     if (config.empty()) {
@@ -1014,6 +1207,38 @@ int VQLiteIndexScann::TrainImpl(
     return 0;
 }
 
+int VQLiteIndexScann::RebalanceImpl(const std::string& config_pbtxt, int32_t nthreads)
+{
+    if (this->scann_handler_ == NULL || is_brute_) {
+        return -1;
+    }
+    if (nthreads > 0) {
+        this->scann_handler_->SetNumThreads(nthreads);
+    }
+
+    std::string config = config_pbtxt;
+    if (config.empty()) {
+        uint32_t nlist = GetPartitioningSize();
+        if (nlist == 0) {
+            nlist = DefaultNlist(datasets_npoints_);
+        }
+        config = GetScannConfig(datasets_npoints_, nlist);
+    }
+    if (config.empty()) {
+        return -1;
+    }
+
+    StatusOr<ScannConfig> ret = this->scann_handler_->RetrainAndReindex(config);
+    if (!ret.ok()) {
+        LOG(INFO) << "rebalance error: " << ret.status().message();
+        return -1;
+    }
+    is_brute_ = ret->has_brute_force();
+    LOG(INFO) << "rebalance done; index npoints=" << GetIndexPointsNum()
+              << "; is_brute=" << is_brute_;
+    return 0;
+}
+
 int VQLiteIndexScann::DumpImpl(std::string& index_dir)
 {
     if (scann_handler_ == NULL) {
@@ -1030,6 +1255,38 @@ int VQLiteIndexScann::DumpImpl(std::string& index_dir)
         return -1;
     }
     return 0;
+}
+
+ret_code_t VQLiteIndexScann::InitializeHealthStats()
+{
+    if (scann_handler_ == NULL) {
+        return RET_CODE_NOREADY;
+    }
+    Status ret = scann_handler_->InitializeHealthStats();
+    if (!ret.ok()) {
+        LOG(INFO) << "InitializeHealthStats error: " << ret.message();
+        return RET_CODE_INDEXERR;
+    }
+    return RET_CODE_OK;
+}
+
+ret_code_t VQLiteIndexScann::GetHealthStats(index_health_stats_t& stats)
+{
+    if (scann_handler_ == NULL) {
+        return RET_CODE_NOREADY;
+    }
+    StatusOr<ScannInterface::ScannHealthStats> ret = scann_handler_->GetHealthStats();
+    if (!ret.ok()) {
+        LOG(INFO) << "GetHealthStats error: " << ret.status().message();
+        return RET_CODE_INDEXERR;
+    }
+    stats.partition_weighted_avg_relative_imbalance_ =
+        ret->partition_weighted_avg_relative_imbalance;
+    stats.partition_avg_relative_positive_imbalance_ =
+        ret->partition_avg_relative_positive_imbalance;
+    stats.avg_quantization_error_ = ret->avg_quantization_error;
+    stats.sum_partition_sizes_ = ret->sum_partition_sizes;
+    return RET_CODE_OK;
 }
 
 int VQLiteIndexScann::SearchImpl(const float* queries, int32_t npoints,
@@ -1222,4 +1479,76 @@ index_stats_t vqindex_stats(void* vql_handler)
     vql_index->GetStats(ret);
 
     return ret;
+}
+
+ret_code_t vqindex_set_tuning(void* vql_handler, index_tuning_config_t tuning)
+{
+    VQLiteIndex* vql_index = static_cast<VQLiteIndex*>(vql_handler);
+    if (vql_index == NULL) {
+        LOG(INFO) << "vql_handler NULL";
+        return RET_CODE_NOINIT;
+    }
+    return vql_index->SetTuning(tuning);
+}
+
+ret_code_t vqindex_suggest_config(
+    void* vql_handler, uint64_t dataset_size, uint32_t nlist,
+    char* config_pbtxt, uint64_t config_pbtxt_len)
+{
+    VQLiteIndex* vql_index = static_cast<VQLiteIndex*>(vql_handler);
+    if (vql_index == NULL) {
+        LOG(INFO) << "vql_handler NULL";
+        return RET_CODE_NOINIT;
+    }
+    if (config_pbtxt == NULL || config_pbtxt_len == 0) {
+        return RET_CODE_MEMORYERR;
+    }
+
+    std::string config;
+    ret_code_t ret = vql_index->SuggestConfig(dataset_size, nlist, config);
+    if (ret != RET_CODE_OK) {
+        return ret;
+    }
+    if (config.size() + 1 > config_pbtxt_len) {
+        return RET_CODE_MEMORYERR;
+    }
+    memcpy(config_pbtxt, config.c_str(), config.size() + 1);
+    return RET_CODE_OK;
+}
+
+ret_code_t vqindex_rebalance(void* vql_handler, const char* config_pbtxt, int32_t nthreads)
+{
+    VQLiteIndex* vql_index = static_cast<VQLiteIndex*>(vql_handler);
+    if (vql_index == NULL) {
+        LOG(INFO) << "vql_handler NULL";
+        return RET_CODE_NOINIT;
+    }
+    return vql_index->Rebalance(config_pbtxt, nthreads);
+}
+
+ret_code_t vqindex_initialize_health_stats(void* vql_handler)
+{
+    VQLiteIndex* vql_index = static_cast<VQLiteIndex*>(vql_handler);
+    if (vql_index == NULL) {
+        LOG(INFO) << "vql_handler NULL";
+        return RET_CODE_NOINIT;
+    }
+    return vql_index->InitializeHealthStats();
+}
+
+ret_code_t vqindex_health_stats(void* vql_handler, index_health_stats_t* stats)
+{
+    VQLiteIndex* vql_index = static_cast<VQLiteIndex*>(vql_handler);
+    if (vql_index == NULL) {
+        LOG(INFO) << "vql_handler NULL";
+        return RET_CODE_NOINIT;
+    }
+    if (stats == NULL) {
+        return RET_CODE_MEMORYERR;
+    }
+    stats->partition_weighted_avg_relative_imbalance_ = 0;
+    stats->partition_avg_relative_positive_imbalance_ = 0;
+    stats->avg_quantization_error_ = 0;
+    stats->sum_partition_sizes_ = 0;
+    return vql_index->GetHealthStats(*stats);
 }

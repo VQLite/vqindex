@@ -89,6 +89,28 @@ struct index_stats_s {
 };
 typedef struct index_stats_s index_stats_t;
 
+struct index_tuning_config_s {
+    uint32_t use_autopilot_;
+    uint32_t enable_soar_;
+    uint32_t topk_;
+    uint32_t reorder_topk_;
+    uint32_t nprobe_;
+    uint32_t autopilot_reordering_dtype_; // 0 keep default, 2 bf16, 3 int8
+    float soar_lambda_;
+    float soar_overretrieve_factor_;
+    uint64_t autopilot_l1_size_;
+    uint64_t autopilot_l3_size_;
+};
+typedef struct index_tuning_config_s index_tuning_config_t;
+
+struct index_health_stats_s {
+    double partition_weighted_avg_relative_imbalance_;
+    double partition_avg_relative_positive_imbalance_;
+    double avg_quantization_error_;
+    uint64_t sum_partition_sizes_;
+};
+typedef struct index_health_stats_s index_health_stats_t;
+
 void *vqindex_init(const char *index_dir, index_config_t config_i);
 
 void vqindex_release(void *vql_handler);
@@ -118,6 +140,18 @@ ret_code_t vqindex_search(
         void *vql_handler, const float *queries, int len, result_search_t *res, params_search_t params);
 
 index_stats_t vqindex_stats(void *vql_handler);
+
+ret_code_t vqindex_set_tuning(void *vql_handler, index_tuning_config_t tuning);
+
+ret_code_t vqindex_suggest_config(
+        void *vql_handler, uint64_t dataset_size, uint32_t nlist,
+        char *config_pbtxt, uint64_t config_pbtxt_len);
+
+ret_code_t vqindex_rebalance(void *vql_handler, const char *config_pbtxt, int32_t nthreads);
+
+ret_code_t vqindex_initialize_health_stats(void *vql_handler);
+
+ret_code_t vqindex_health_stats(void *vql_handler, index_health_stats_t *stats);
 
 #ifdef __cplusplus
 }

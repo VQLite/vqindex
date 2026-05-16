@@ -73,6 +73,30 @@ class IndexStats(ctypes.Structure):
     ]
 
 
+class IndexTuningConfig(ctypes.Structure):
+    _fields_ = [
+        ("use_autopilot_", ctypes.c_uint32),
+        ("enable_soar_", ctypes.c_uint32),
+        ("topk_", ctypes.c_uint32),
+        ("reorder_topk_", ctypes.c_uint32),
+        ("nprobe_", ctypes.c_uint32),
+        ("autopilot_reordering_dtype_", ctypes.c_uint32),
+        ("soar_lambda_", ctypes.c_float),
+        ("soar_overretrieve_factor_", ctypes.c_float),
+        ("autopilot_l1_size_", ctypes.c_uint64),
+        ("autopilot_l3_size_", ctypes.c_uint64),
+    ]
+
+
+class IndexHealthStats(ctypes.Structure):
+    _fields_ = [
+        ("partition_weighted_avg_relative_imbalance_", ctypes.c_double),
+        ("partition_avg_relative_positive_imbalance_", ctypes.c_double),
+        ("avg_quantization_error_", ctypes.c_double),
+        ("sum_partition_sizes_", ctypes.c_uint64),
+    ]
+
+
 def load_library() -> ctypes.CDLL:
     if not LIB_PATH.exists():
         raise AssertionError(f"{LIB_PATH} is missing; run ./build.sh vqindex_api first")
@@ -108,6 +132,22 @@ def load_library() -> ctypes.CDLL:
     lib.vqindex_dump.restype = ctypes.c_int
     lib.vqindex_stats.argtypes = [ctypes.c_void_p]
     lib.vqindex_stats.restype = IndexStats
+    lib.vqindex_set_tuning.argtypes = [ctypes.c_void_p, IndexTuningConfig]
+    lib.vqindex_set_tuning.restype = ctypes.c_int
+    lib.vqindex_suggest_config.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint64,
+        ctypes.c_uint32,
+        ctypes.c_char_p,
+        ctypes.c_uint64,
+    ]
+    lib.vqindex_suggest_config.restype = ctypes.c_int
+    lib.vqindex_rebalance.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int32]
+    lib.vqindex_rebalance.restype = ctypes.c_int
+    lib.vqindex_initialize_health_stats.argtypes = [ctypes.c_void_p]
+    lib.vqindex_initialize_health_stats.restype = ctypes.c_int
+    lib.vqindex_health_stats.argtypes = [ctypes.c_void_p, ctypes.POINTER(IndexHealthStats)]
+    lib.vqindex_health_stats.restype = ctypes.c_int
     return lib
 
 
@@ -175,9 +215,20 @@ def assert_stats(stats: IndexStats, *, dataset_size: int, index_size: int, dim: 
     assert stats.brute_threshold_ == 4096, stats.brute_threshold_
 
 
+def suggest_config(
+    lib: ctypes.CDLL, handler: ctypes.c_void_p, dataset_size: int, nlist: int = 0
+) -> str:
+    buf = ctypes.create_string_buffer(1 << 20)
+    assert_ok(
+        lib.vqindex_suggest_config(handler, dataset_size, nlist, buf, len(buf)),
+        "suggest config",
+    )
+    return buf.value.decode("utf-8")
+
+
 def main() -> None:
     dim = 32
-    base_count = 8192
+    base_count = 9000
     target_vid = 424242
     added_vid = 424243
 
@@ -214,6 +265,37 @@ def main() -> None:
         assert results, "expected at least one search result"
         assert results[0].vid_ == target_vid, results[0].vid_
         assert results[0].score_ > 0.99, results[0].score_
+
+        assert_ok(lib.vqindex_initialize_health_stats(handler), "initialize health stats")
+        health = IndexHealthStats()
+        assert_ok(lib.vqindex_health_stats(handler, ctypes.byref(health)), "health stats")
+        assert health.sum_partition_sizes_ == base_count + 1, health.sum_partition_sizes_
+
+        tuning = IndexTuningConfig(
+            use_autopilot_=1,
+            enable_soar_=1,
+            topk_=10,
+            reorder_topk_=64,
+            nprobe_=32,
+            autopilot_reordering_dtype_=3,
+            soar_lambda_=1.5,
+            soar_overretrieve_factor_=2.0,
+            autopilot_l1_size_=256,
+            autopilot_l3_size_=1 << 20,
+        )
+        assert_ok(lib.vqindex_set_tuning(handler, tuning), "set tuning")
+        tuned_config = suggest_config(lib, handler, base_count + 1, stats.index_nlist_)
+        assert "autopilot" not in tuned_config, tuned_config
+        assert "database_spilling" in tuned_config, tuned_config
+        assert "overretrieve_factor" in tuned_config, tuned_config
+        assert_ok(
+            lib.vqindex_rebalance(handler, tuned_config.encode("utf-8"), 8),
+            "rebalance",
+        )
+        stats = lib.vqindex_stats(handler)
+        assert_stats(stats, dataset_size=base_count + 1, index_size=base_count + 1, dim=dim)
+        results = search_one(lib, handler, target_vector, topk=10, reorder_topk=64, nprobe=32)
+        assert results[0].vid_ == target_vid, results[0].vid_
 
         assert_ok(lib.vqindex_dump(handler), "dump")
         assert (index_dir / "datasets.vql").exists()
