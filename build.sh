@@ -113,7 +113,7 @@ HWY_TARGET_MODE="${VQINDEX_HWY_TARGETS:-all}"
 compile_flag_supported() {
     local flag="$1"
     local output
-    output="$(mktemp "${TMPDIR:-/tmp}/vqindex-flag-test.XXXXXX.o")"
+    output="$(mktemp "${TMPDIR:-/tmp}/vqindex-flag-test.XXXXXX")"
     printf 'int main() { return 0; }\n' | "${CC_BIN}" -x c++ -c -o "${output}" "${flag}" - >/dev/null 2>&1
     local result=$?
     rm -f "${output}"
