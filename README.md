@@ -67,3 +67,16 @@ python3 test/test_go_scann_api.py
 ```
 This test mirrors the Go wrapper in VQLite: file-backed storage, default
 training, search, dump/reload, and incremental add/train/search.
+
+## Standard ScaNN example benchmark
+Use the upstream ScaNN `docs/example.ipynb` GloVe-100 angular flow as the
+standard end-to-end regression test after code changes:
+```
+test/run_scann_example_benchmark.sh
+```
+The runner builds `vqindex_api`, downloads/caches the ANN benchmark dataset
+under `/tmp`, trains Tree-AH with `num_leaves=2000`, verifies recall, dumps the
+index, checks that packed LUT16 artifacts are used instead of
+`hashed_dataset.npy`, reloads the index, and searches again. If the active
+Python environment lacks `numpy`, `h5py`, or `requests`, the runner installs
+`uv` when needed and creates a virtual environment under `.tools/`.
