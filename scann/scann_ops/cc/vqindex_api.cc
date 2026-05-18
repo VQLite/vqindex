@@ -1201,6 +1201,7 @@ int VQLiteIndexScann::TrainImpl(
     }
     std::string config = GetScannConfig(npoints, nlist);
     if (config.empty()) {
+        delete scann_handler;
         return -1;
     }
 
@@ -1384,6 +1385,7 @@ void* vqindex_init(const char* index_dir, index_config_t config_i)
 
     if (!vql_index->Init()) {
         LOG(INFO) << "Init Fail.";
+        delete vql_index;
         return NULL;
     }
 
