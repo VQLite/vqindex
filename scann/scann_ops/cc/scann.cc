@@ -249,6 +249,8 @@ StatusOr<ScannInterface::ScannArtifacts> ScannInterface::LoadArtifacts(
       packed.num_blocks = num_blocks;
       opts.leaf_packed_lut16_datasets->push_back(std::move(packed));
     }
+    opts.hashed_dataset.reset();
+    opts.soar_hashed_dataset.reset();
   }
   if (fp->fixed_point_dataset != nullptr) {
     if (fp->squared_l2_norm_by_datapoint == nullptr)

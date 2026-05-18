@@ -825,40 +825,45 @@ public:
         return content;
     }
 
+    bool AssetExists(std::string& index_dir, const std::string& filename)
+    {
+        std::string file_path = index_dir + "/" + filename;
+        return IsExists(file_path);
+    }
+
+    std::string AssetInfo(const std::string& asset_type, const std::string& asset_path)
+    {
+        return "assets { \n\
+                asset_type: " + asset_type + " \n\
+                asset_path: \"" + asset_path + "\" \n\
+            } \n";
+    }
+
     std::string GetAssetsInfo(std::string& index_dir)
     {
-        std::string assets_info = "assets { \n\
-                asset_type: AH_CENTERS \n\
-                asset_path: \"$index_dir/ah_codebook.pb\" \n\
-            } \n\
-            assets { \n\
-                asset_type: PARTITIONER \n\
-                asset_path: \"$index_dir/serialized_partitioner.pb\" \n\
-            }\n\
-            assets { \n\
-                asset_type: TOKENIZATION_NPY \n\
-                asset_path: \"$index_dir/datapoint_to_token.npy\" \n\
-            } \n\
-            assets { \n\
-                asset_type: AH_LEAF_LUT16_PACKED_DATASET_NPY \n\
-                asset_path: \"$index_dir/leaf_lut16_packed_dataset.npy\" \n\
-            } \n\
-            assets { \n\
-                asset_type: AH_LEAF_LUT16_PACKED_META_NPY \n\
-                asset_path: \"$index_dir/leaf_lut16_packed_meta.npy\" \n\
-            } \n\
-            assets { \n\
-                asset_type: INT8_DATASET_NPY \n\
-                asset_path: \"$index_dir/int8_dataset.npy\" \n\
-            } \n\
-            assets { \n\
-                asset_type: INT8_MULTIPLIERS_NPY \n\
-                asset_path: \"$index_dir/int8_multipliers.npy\" \n\
-            } \n\
-            assets { \n\
-                asset_type: INT8_NORMS_NPY \n\
-                asset_path: \"$index_dir/dp_norms.npy\" \n\
-            }";
+        std::string assets_info;
+        assets_info += AssetInfo("AH_CENTERS", index_dir + "/ah_codebook.pb");
+        assets_info += AssetInfo("PARTITIONER", index_dir + "/serialized_partitioner.pb");
+        assets_info += AssetInfo("TOKENIZATION_NPY", index_dir + "/datapoint_to_token.npy");
+
+        const bool has_packed_lut16 =
+            AssetExists(index_dir, "leaf_lut16_packed_dataset.npy") &&
+            AssetExists(index_dir, "leaf_lut16_packed_meta.npy");
+        if (has_packed_lut16) {
+            assets_info += AssetInfo("AH_LEAF_LUT16_PACKED_DATASET_NPY",
+                index_dir + "/leaf_lut16_packed_dataset.npy");
+            assets_info += AssetInfo("AH_LEAF_LUT16_PACKED_META_NPY",
+                index_dir + "/leaf_lut16_packed_meta.npy");
+        } else {
+            assets_info += AssetInfo("AH_DATASET_NPY", index_dir + "/hashed_dataset.npy");
+            if (AssetExists(index_dir, "hashed_dataset_soar.npy")) {
+                assets_info +=
+                    AssetInfo("AH_DATASET_SOAR_NPY", index_dir + "/hashed_dataset_soar.npy");
+            }
+        }
+        assets_info += AssetInfo("INT8_DATASET_NPY", index_dir + "/int8_dataset.npy");
+        assets_info += AssetInfo("INT8_MULTIPLIERS_NPY", index_dir + "/int8_multipliers.npy");
+        assets_info += AssetInfo("INT8_NORMS_NPY", index_dir + "/dp_norms.npy");
 
         std::string assets_info_brute = "assets { \n\
                 asset_type: DATASET_NPY \n\
@@ -868,19 +873,32 @@ public:
         if (is_brute_) {
             return std::regex_replace(assets_info_brute, std::regex("\\$index_dir"), index_dir);
         }
-        return std::regex_replace(assets_info, std::regex("\\$index_dir"), index_dir);
+        return assets_info;
     }
 
     bool CheckIndexFiles(std::string& index_dir)
     {
-        std::string index_files[] = { "scann_config.pb", "ah_codebook.pb",
+        std::string packed_index_files[] = { "scann_config.pb", "ah_codebook.pb",
             "serialized_partitioner.pb", "datapoint_to_token.npy",
             "leaf_lut16_packed_dataset.npy", "leaf_lut16_packed_meta.npy",
             "int8_dataset.npy", "int8_multipliers.npy", "dp_norms.npy" };
 
         bool ret = true;
-        for (size_t i : Seq(sizeof(index_files) / sizeof(index_files[0]))) {
-            std::string index_file = index_dir + "/" + index_files[i];
+        for (size_t i : Seq(sizeof(packed_index_files) / sizeof(packed_index_files[0]))) {
+            std::string index_file = index_dir + "/" + packed_index_files[i];
+            if (!IsExists(index_file)) {
+                ret = false;
+            }
+        }
+        if (ret)
+            return true;
+
+        std::string legacy_index_files[] = { "scann_config.pb", "ah_codebook.pb",
+            "serialized_partitioner.pb", "datapoint_to_token.npy",
+            "hashed_dataset.npy", "int8_dataset.npy", "int8_multipliers.npy", "dp_norms.npy" };
+        ret = true;
+        for (size_t i : Seq(sizeof(legacy_index_files) / sizeof(legacy_index_files[0]))) {
+            std::string index_file = index_dir + "/" + legacy_index_files[i];
             if (!IsExists(index_file)) {
                 ret = false;
             }
@@ -1253,6 +1271,19 @@ int VQLiteIndexScann::DumpImpl(std::string& index_dir)
                      .Write(assets_or->DebugString());
     if (!ret.ok()) {
         return -1;
+    }
+    bool wrote_packed_lut16 = false;
+    for (const auto& asset : assets_or->assets()) {
+        if (asset.asset_type() == ScannAsset::AH_LEAF_LUT16_PACKED_DATASET_NPY ||
+            asset.asset_type() == ScannAsset::AH_LEAF_LUT16_PACKED_META_NPY) {
+            wrote_packed_lut16 = true;
+        }
+    }
+    if (wrote_packed_lut16) {
+        std::error_code ec;
+        std::filesystem::remove(index_dir + "/hashed_dataset.npy", ec);
+        ec.clear();
+        std::filesystem::remove(index_dir + "/hashed_dataset_soar.npy", ec);
     }
     return 0;
 }

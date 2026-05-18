@@ -9,11 +9,13 @@ Go-style search result handling.
 from __future__ import annotations
 
 import ctypes
+import ast
 import math
 import os
 import platform
 import random
 import shutil
+import struct
 import sys
 import tempfile
 from pathlib import Path
@@ -226,6 +228,113 @@ def suggest_config(
     return buf.value.decode("utf-8")
 
 
+def read_npy(path: Path) -> tuple[tuple[int, ...], str, bytes]:
+    data = path.read_bytes()
+    if data[:6] != b"\x93NUMPY":
+        raise AssertionError(f"{path} is not an NPY file")
+    major = data[6]
+    if major == 1:
+        header_len = struct.unpack_from("<H", data, 8)[0]
+        offset = 10
+    elif major == 2:
+        header_len = struct.unpack_from("<I", data, 8)[0]
+        offset = 12
+    else:
+        raise AssertionError(f"unsupported NPY version {major} in {path}")
+    header = ast.literal_eval(data[offset : offset + header_len].decode("latin1"))
+    if header.get("fortran_order"):
+        raise AssertionError(f"fortran-order NPY is not supported: {path}")
+    return tuple(header["shape"]), header["descr"], data[offset + header_len :]
+
+
+def write_npy_u1(path: Path, shape: tuple[int, ...], payload: bytes | bytearray) -> None:
+    header = f"{{'descr': '|u1', 'fortran_order': False, 'shape': {shape}, }}"
+    header_len = len(header) + 1
+    padding = (16 - ((10 + header_len) % 16)) % 16
+    header_bytes = (header + (" " * padding) + "\n").encode("latin1")
+    path.write_bytes(b"\x93NUMPY\x01\x00" + struct.pack("<H", len(header_bytes)) + header_bytes + payload)
+
+
+def unpack_lut16_leaf(packed: bytes, num_datapoints: int, num_blocks: int) -> bytearray:
+    unpacked = bytearray(num_datapoints * num_blocks)
+    idx = 0
+    for dp_block in range(num_datapoints // 32):
+        out_idx = 32 * dp_block
+        for dim in range(num_blocks):
+            for offset in range(16):
+                value = packed[idx]
+                idx += 1
+                unpacked[((out_idx | offset) * num_blocks) + dim] = value & 0x0F
+                unpacked[((out_idx | 16 | offset) * num_blocks) + dim] = value >> 4
+    if num_datapoints % 32:
+        out_idx = num_datapoints - (num_datapoints % 32)
+        for dim in range(num_blocks):
+            for offset in range(16):
+                value = packed[idx]
+                idx += 1
+                idx1 = out_idx | offset
+                idx2 = out_idx | 16 | offset
+                if idx1 < num_datapoints:
+                    unpacked[(idx1 * num_blocks) + dim] = value & 0x0F
+                if idx2 < num_datapoints:
+                    unpacked[(idx2 * num_blocks) + dim] = value >> 4
+    return unpacked
+
+
+def convert_packed_artifacts_to_legacy_hashed(index_dir: Path, *, has_soar: bool) -> None:
+    index_path = index_dir / "index"
+    token_shape, token_descr, token_payload = read_npy(index_path / "datapoint_to_token.npy")
+    if token_descr not in ("<i4", "|i4"):
+        raise AssertionError(f"unexpected token dtype: {token_descr}")
+    tokens = list(struct.unpack("<" + "i" * token_shape[0], token_payload))
+
+    data_shape, data_descr, packed_payload = read_npy(
+        index_path / "leaf_lut16_packed_dataset.npy"
+    )
+    if data_descr not in ("|u1", "<u1"):
+        raise AssertionError(f"unexpected packed dtype: {data_descr}")
+    meta_shape, meta_descr, meta_payload = read_npy(index_path / "leaf_lut16_packed_meta.npy")
+    if meta_descr not in ("<u8", "|u8"):
+        raise AssertionError(f"unexpected packed metadata dtype: {meta_descr}")
+    meta = list(struct.unpack("<" + "Q" * (meta_shape[0] * meta_shape[1]), meta_payload))
+
+    n_leaves = meta_shape[0]
+    num_blocks = next(meta[4 * leaf + 3] for leaf in range(n_leaves) if meta[4 * leaf + 2] > 0)
+    total_datapoints = len(tokens) // 2 if has_soar else len(tokens)
+    hashed = bytearray(total_datapoints * num_blocks)
+    soar_hashed = bytearray(total_datapoints * num_blocks) if has_soar else None
+    datapoints_by_token: list[list[int]] = [[] for _ in range(n_leaves)]
+    for idx, token in enumerate(tokens):
+        if token >= 0:
+            datapoints_by_token[token].append(idx)
+
+    for leaf in range(n_leaves):
+        offset, byte_size, leaf_num_datapoints, leaf_blocks = meta[4 * leaf : 4 * leaf + 4]
+        indices = datapoints_by_token[leaf]
+        assert len(indices) == leaf_num_datapoints, (leaf, len(indices), leaf_num_datapoints)
+        if leaf_num_datapoints == 0:
+            continue
+        assert leaf_blocks == num_blocks, (leaf, leaf_blocks, num_blocks)
+        leaf_payload = packed_payload[offset : offset + byte_size]
+        unpacked = unpack_lut16_leaf(leaf_payload, leaf_num_datapoints, num_blocks)
+        for local_idx, token_idx in enumerate(indices):
+            global_idx = token_idx // 2 if has_soar else token_idx
+            dst = global_idx * num_blocks
+            src = local_idx * num_blocks
+            if has_soar and token_idx % 2:
+                assert soar_hashed is not None
+                soar_hashed[dst : dst + num_blocks] = unpacked[src : src + num_blocks]
+            else:
+                hashed[dst : dst + num_blocks] = unpacked[src : src + num_blocks]
+
+    write_npy_u1(index_path / "hashed_dataset.npy", (total_datapoints, num_blocks), hashed)
+    if soar_hashed is not None:
+        write_npy_u1(index_path / "hashed_dataset_soar.npy", (total_datapoints, num_blocks), soar_hashed)
+    (index_path / "leaf_lut16_packed_dataset.npy").unlink()
+    (index_path / "leaf_lut16_packed_meta.npy").unlink()
+    assert data_shape[0] == len(packed_payload), data_shape
+
+
 def main() -> None:
     dim = 32
     base_count = 9000
@@ -305,14 +414,25 @@ def main() -> None:
         assert (index_dir / "index" / "leaf_lut16_packed_dataset.npy").exists()
         assert (index_dir / "index" / "leaf_lut16_packed_meta.npy").exists()
         assert not (index_dir / "index" / "hashed_dataset.npy").exists()
+        convert_packed_artifacts_to_legacy_hashed(index_dir, has_soar=True)
+        assert (index_dir / "index" / "hashed_dataset.npy").exists()
+        assert (index_dir / "index" / "hashed_dataset_soar.npy").exists()
+        assert not (index_dir / "index" / "leaf_lut16_packed_dataset.npy").exists()
+        assert not (index_dir / "index" / "leaf_lut16_packed_meta.npy").exists()
 
         lib.vqindex_release(handler)
+        handler = None
         handler = init_index(lib, index_dir, dim)
         stats = lib.vqindex_stats(handler)
         assert_stats(stats, dataset_size=base_count + 1, index_size=base_count + 1, dim=dim)
         assert stats.current_status_ == INDEX_STATE_READY, stats.current_status_
         results = search_one(lib, handler, target_vector)
         assert results[0].vid_ == target_vid, results[0].vid_
+        assert_ok(lib.vqindex_dump(handler), "dump after legacy load")
+        assert (index_dir / "index" / "leaf_lut16_packed_dataset.npy").exists()
+        assert (index_dir / "index" / "leaf_lut16_packed_meta.npy").exists()
+        assert not (index_dir / "index" / "hashed_dataset.npy").exists()
+        assert not (index_dir / "index" / "hashed_dataset_soar.npy").exists()
 
         add_vectors(lib, handler, [added_vector], [added_vid])
         stats = lib.vqindex_stats(handler)
