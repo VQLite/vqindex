@@ -79,6 +79,15 @@ class IndexStats(ctypes.Structure):
         ("dim_", ctypes.c_int32),
         ("is_brute_", ctypes.c_int8),
         ("current_status_", ctypes.c_int),
+        ("pending_size_", ctypes.c_int64),
+        ("deleted_size_", ctypes.c_int64),
+        ("last_load_ms_", ctypes.c_int64),
+        ("last_dump_ms_", ctypes.c_int64),
+        ("last_train_ms_", ctypes.c_int64),
+        ("last_rebalance_ms_", ctypes.c_int64),
+        ("artifact_format_", ctypes.c_int),
+        ("use_autopilot_", ctypes.c_int8),
+        ("enable_soar_", ctypes.c_int8),
     ]
 
 
@@ -211,8 +220,10 @@ def load_library() -> ctypes.CDLL:
     lib.vqindex_search.argtypes = [
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_float),
-        ctypes.c_int,
+        ctypes.c_uint64,
         ctypes.POINTER(ResultSearch),
+        ctypes.c_uint64,
+        ctypes.POINTER(ctypes.c_uint64),
         ParamsSearch,
     ]
     lib.vqindex_search.restype = ctypes.c_int
@@ -384,16 +395,20 @@ def search_batched(
         end = min(start + batch_rows, n_queries)
         q = np.ascontiguousarray(queries[start:end], dtype=np.float32)
         result = (ResultSearch * (q.shape[0] * topk))()
+        result_count = ctypes.c_uint64(0)
         assert_ok(
             lib.vqindex_search(
                 handler,
                 q.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
                 q.size,
                 result,
+                q.shape[0] * topk,
+                ctypes.byref(result_count),
                 params,
             ),
             f"search {start}:{end}",
         )
+        assert result_count.value <= q.shape[0] * topk, result_count.value
         neighbors = np.empty((q.shape[0], topk), dtype=np.int64)
         for i in range(q.shape[0]):
             for j in range(topk):

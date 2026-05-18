@@ -19,7 +19,9 @@
 #include <utility>
 #include <vector>
 
+#include <algorithm>
 #include <atomic>
+#include <climits>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
@@ -42,6 +44,27 @@ using namespace std;
 
 namespace vqindex {
 
+thread_local std::string g_last_error;
+
+int64_t MillisecondsSince(std::chrono::steady_clock::time_point start)
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start)
+        .count();
+}
+
+ret_code_t CopyStringToBuffer(const std::string& value, char* buffer, uint64_t buffer_len)
+{
+    if (buffer == NULL || buffer_len == 0) {
+        return RET_CODE_MEMORYERR;
+    }
+    if (value.size() + 1 > buffer_len) {
+        return RET_CODE_MEMORYERR;
+    }
+    memcpy(buffer, value.c_str(), value.size() + 1);
+    return RET_CODE_OK;
+}
+
 class VQLiteIndex {
 public:
     VQLiteIndex(const char* index_root_dir, index_config_t config_i)
@@ -52,7 +75,14 @@ public:
         , current_state_(INDEX_STATE_NOINIT)
         , current_search_n_(0)
         , datasets_npoints_(0)
+        , datasets_dirty_(false)
         , is_child_process_(false)
+        , deleted_npoints_(0)
+        , last_load_ms_(0)
+        , last_dump_ms_(0)
+        , last_train_ms_(0)
+        , last_rebalance_ms_(0)
+        , artifact_format_(ARTIFACT_FORMAT_UNKNOWN)
     {
         index_root_dir_ = ".";
         if (index_root_dir != NULL) {
@@ -77,6 +107,20 @@ public:
 
     virtual ~VQLiteIndex() { }
 
+    void SetError(const std::string& error)
+    {
+        last_error_ = error;
+        g_last_error = error;
+    }
+
+    void ClearError()
+    {
+        last_error_.clear();
+        g_last_error.clear();
+    }
+
+    const std::string& LastError() const { return last_error_; }
+
     bool IsExists(std::string& file_path) { return std::filesystem::exists(file_path); }
 
     int64_t GetFileSize(std::string& file_path)
@@ -99,6 +143,18 @@ public:
         }
         stats.brute_threshold_ = brute_threshold_;
         stats.current_status_ = current_state_;
+        stats.pending_size_ = stats.vid_size_ - stats.index_size_;
+        if (stats.pending_size_ < 0) {
+            stats.pending_size_ = 0;
+        }
+        stats.deleted_size_ = deleted_npoints_;
+        stats.last_load_ms_ = last_load_ms_;
+        stats.last_dump_ms_ = last_dump_ms_;
+        stats.last_train_ms_ = last_train_ms_;
+        stats.last_rebalance_ms_ = last_rebalance_ms_;
+        stats.artifact_format_ = artifact_format_;
+        stats.use_autopilot_ = UseAutopilot() ? 1 : 0;
+        stats.enable_soar_ = EnableSoar() ? 1 : 0;
     }
 
     bool LoadVids()
@@ -147,6 +203,22 @@ public:
 
         return true;
     }
+    bool LoadAllDatasetsForMutation()
+    {
+        if (datasets_.size() / dim_ == vids_.size()) {
+            return true;
+        }
+        std::vector<float> datasets;
+        if (!LoadTrainDatasets(datasets, 0)) {
+            return false;
+        }
+        if (datasets.size() / dim_ < vids_.size()) {
+            return false;
+        }
+        datasets.resize(vids_.size() * dim_);
+        datasets_.swap(datasets);
+        return true;
+    }
 
     bool Init();
     virtual bool InitImpl(std::string& index_dir)
@@ -157,6 +229,8 @@ public:
 
     // only add vectors to original datasets
     ret_code_t AddDatasets(const float* datasets, uint64_t len, const int64_t* vids);
+    ret_code_t UpsertDatasets(const float* datasets, uint64_t len, const int64_t* vids);
+    ret_code_t DeleteVids(const int64_t* vids, uint64_t n);
 
     void Reset()
     {
@@ -166,6 +240,7 @@ public:
         vids_.swap(t2);
 
         datasets_npoints_ = 0;
+        datasets_dirty_ = false;
 
         ResetImpl();
     }
@@ -205,7 +280,7 @@ public:
         return 0;
     }
 
-    ret_code_t Search(const float* queries, int32_t len, std::vector<result_search_t>& res,
+    ret_code_t Search(const float* queries, uint64_t len, std::vector<result_search_t>& res,
         params_search_t params);
     virtual int SearchImpl(const float* queries, int32_t npoints, std::vector<result_search_t>& res,
         params_search_t params)
@@ -219,6 +294,8 @@ public:
     virtual size_t GetIndexPointsNum() = 0;
 
     virtual bool IsBrute() { return false; }
+    virtual bool UseAutopilot() { return false; }
+    virtual bool EnableSoar() { return false; }
     virtual ret_code_t SetTuning(index_tuning_config_t tuning) { return RET_CODE_INDEXERR; }
     virtual ret_code_t SuggestConfig(uint64_t dataset_size, uint32_t nlist, std::string& config)
     {
@@ -226,10 +303,17 @@ public:
     }
     virtual ret_code_t InitializeHealthStats() { return RET_CODE_INDEXERR; }
     virtual ret_code_t GetHealthStats(index_health_stats_t& stats) { return RET_CODE_INDEXERR; }
+    virtual std::string CurrentConfig() { return std::string(); }
+    virtual int DeleteImpl(uint64_t idx) { return -1; }
+    virtual int UpdateImpl(uint64_t idx, const float* dataset) { return -1; }
 
 protected:
     ret_code_t AddDatasetsMemory(const float* datasets, uint64_t len, const int64_t* vids);
     ret_code_t AddDatasetsFile(const float* datasets, uint64_t len, const int64_t* vids);
+    ret_code_t UpsertOne(const float* dataset, int64_t vid);
+    bool FindVid(int64_t vid, size_t& idx);
+    void RemoveVidAt(size_t idx);
+    void UpsertDatasetMemory(size_t idx, const float* dataset);
 
     std::string index_root_dir_;
     std::string datasets_filename_;
@@ -240,6 +324,7 @@ protected:
     std::vector<int64_t> vids_;
 
     uint64_t datasets_npoints_;
+    bool datasets_dirty_;
 
     uint32_t dim_; // dimensions of vector point
     storage_type_t storage_type_;
@@ -252,10 +337,18 @@ protected:
     bool is_child_process_;
 
     index_state_t current_state_;
+    uint64_t deleted_npoints_;
+    int64_t last_load_ms_;
+    int64_t last_dump_ms_;
+    int64_t last_train_ms_;
+    int64_t last_rebalance_ms_;
+    artifact_format_t artifact_format_;
+    std::string last_error_;
 };
 
 bool VQLiteIndex::Init()
 {
+    auto start = std::chrono::steady_clock::now();
     bool ret = false;
 
     std::string datasets_file_path = index_root_dir_ + "/" + datasets_filename_;
@@ -277,6 +370,7 @@ bool VQLiteIndex::Init()
         LOG(INFO) << "dataset_.size=" << datasets_.size();
     }
     if (!ret) {
+        SetError("init failed");
         Reset();
     } else {
         if (index_npoints > 0) {
@@ -288,6 +382,7 @@ bool VQLiteIndex::Init()
         datasets_npoints_ = datasets_npoints;
     }
 
+    last_load_ms_ = MillisecondsSince(start);
     return ret;
 }
 
@@ -337,10 +432,12 @@ ret_code_t VQLiteIndex::AddDatasetsFile(const float* datasets, uint64_t len, con
 ret_code_t VQLiteIndex::AddDatasets(const float* datasets, uint64_t len, const int64_t* vids)
 {
     if (current_state_ > INDEX_STATE_READY) {
+        SetError("index is busy");
         return RET_CODE_NOREADY;
     }
-    if (len % dim_ != 0) {
+    if (datasets == NULL || vids == NULL || dim_ == 0 || len % dim_ != 0) {
         LOG(INFO) << "!is_init_ || len % dim_ != 0; current_state_=" << current_state_;
+        SetError("invalid dataset length or null input");
         return RET_CODE_DATAERR;
     }
 
@@ -364,6 +461,10 @@ ret_code_t VQLiteIndex::AddDatasets(const float* datasets, uint64_t len, const i
         ret = AddDatasetsMemory(datasets, len, vids);
     } else {
         ret = AddDatasetsFile(datasets, len, vids);
+        if (ret == RET_CODE_OK && !datasets_.empty()) {
+            ret = AddDatasetsMemory(datasets, len, vids);
+            datasets_dirty_ = true;
+        }
     }
 
     if (ret == RET_CODE_OK) {
@@ -381,6 +482,186 @@ ret_code_t VQLiteIndex::AddDatasets(const float* datasets, uint64_t len, const i
         current_state_ = INDEX_STATE_NOINDEX;
     }
 
+    return ret;
+}
+
+bool VQLiteIndex::FindVid(int64_t vid, size_t& idx)
+{
+    auto it = std::find(vids_.begin(), vids_.end(), vid);
+    if (it == vids_.end()) {
+        return false;
+    }
+    idx = static_cast<size_t>(std::distance(vids_.begin(), it));
+    return true;
+}
+
+void VQLiteIndex::RemoveVidAt(size_t idx)
+{
+    const size_t old_size = vids_.size();
+    if (idx >= old_size) {
+        return;
+    }
+    if (idx + 1 != old_size) {
+        vids_[idx] = vids_.back();
+        const size_t memory_npoints = datasets_.size() / dim_;
+        if (memory_npoints >= old_size) {
+            float* dst = datasets_.data() + idx * dim_;
+            float* src = datasets_.data() + (old_size - 1) * dim_;
+            memcpy(dst, src, dim_ * sizeof(float));
+        }
+    }
+    vids_.pop_back();
+    if (datasets_.size() / dim_ >= old_size) {
+        datasets_.resize((old_size - 1) * dim_);
+        datasets_npoints_ = datasets_.size() / dim_;
+        datasets_dirty_ = true;
+    }
+    deleted_npoints_++;
+}
+
+void VQLiteIndex::UpsertDatasetMemory(size_t idx, const float* dataset)
+{
+    if (dataset == NULL) {
+        return;
+    }
+    const size_t memory_npoints = datasets_.size() / dim_;
+    if (idx >= memory_npoints) {
+        return;
+    }
+    memcpy(datasets_.data() + idx * dim_, dataset, dim_ * sizeof(float));
+    datasets_dirty_ = true;
+}
+
+ret_code_t VQLiteIndex::UpsertOne(const float* dataset, int64_t vid)
+{
+    size_t idx = 0;
+    if (FindVid(vid, idx)) {
+        if (GetIndexPointsNum() <= idx) {
+            UpsertDatasetMemory(idx, dataset);
+            return RET_CODE_OK;
+        }
+        if (UpdateImpl(idx, dataset) != 0) {
+            SetError("update datapoint in index failed");
+            return RET_CODE_INDEXERR;
+        }
+        UpsertDatasetMemory(idx, dataset);
+        return RET_CODE_OK;
+    }
+
+    ret_code_t ret = RET_CODE_OK;
+    if (storage_type_ == STORAGE_MEMORY) {
+        ret = AddDatasetsMemory(dataset, dim_, &vid);
+    } else {
+        ret = AddDatasetsFile(dataset, dim_, &vid);
+        if (ret == RET_CODE_OK && !datasets_.empty()) {
+            ret = AddDatasetsMemory(dataset, dim_, &vid);
+            datasets_dirty_ = true;
+        }
+    }
+    if (ret != RET_CODE_OK) {
+        SetError("append upsert datapoint failed");
+        return ret;
+    }
+
+    {
+        unique_lock<shared_mutex> wulk(smutex_vid_rwlock_);
+        vids_.push_back(vid);
+    }
+    datasets_npoints_++;
+
+    if (GetIndexPointsNum() > 0) {
+        std::vector<float> add_dataset(dataset, dataset + dim_);
+        if (AddImpl(add_dataset, 1, 0) != 0) {
+            SetError("add upsert datapoint to index failed");
+            return RET_CODE_ADD2INDEXERR;
+        }
+    }
+    return RET_CODE_OK;
+}
+
+ret_code_t VQLiteIndex::UpsertDatasets(const float* datasets, uint64_t len, const int64_t* vids)
+{
+    if (current_state_ > INDEX_STATE_READY) {
+        SetError("index is busy");
+        return RET_CODE_NOREADY;
+    }
+    if (datasets == NULL || vids == NULL || dim_ == 0 || len % dim_ != 0) {
+        SetError("invalid upsert dataset length or null input");
+        return RET_CODE_DATAERR;
+    }
+
+    std::lock_guard<std::mutex> guard(mutex_global_lock_);
+    if (storage_type_ == STORAGE_FILE && !LoadAllDatasetsForMutation()) {
+        SetError("load file datasets for upsert failed");
+        return RET_CODE_DATAERR;
+    }
+    current_state_ = INDEX_STATE_ADD;
+    while (current_search_n_ > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        LOG(INFO) << "wait search = " << current_search_n_;
+    }
+
+    ret_code_t ret = RET_CODE_OK;
+    const uint64_t npoints = len / dim_;
+    for (uint64_t i = 0; i < npoints; ++i) {
+        ret = UpsertOne(datasets + i * dim_, vids[i]);
+        if (ret != RET_CODE_OK) {
+            break;
+        }
+    }
+
+    if (GetIndexPointsNum() > 0) {
+        current_state_ = INDEX_STATE_READY;
+    } else {
+        current_state_ = INDEX_STATE_NOINDEX;
+    }
+    return ret;
+}
+
+ret_code_t VQLiteIndex::DeleteVids(const int64_t* vids, uint64_t n)
+{
+    if (current_state_ > INDEX_STATE_READY || current_state_ < INDEX_STATE_READY) {
+        SetError("delete requires a ready index");
+        return RET_CODE_NOREADY;
+    }
+    if (vids == NULL && n > 0) {
+        SetError("delete vids is null");
+        return RET_CODE_DATAERR;
+    }
+
+    std::lock_guard<std::mutex> guard(mutex_global_lock_);
+    if (storage_type_ == STORAGE_FILE && !LoadAllDatasetsForMutation()) {
+        SetError("load file datasets for delete failed");
+        return RET_CODE_DATAERR;
+    }
+    current_state_ = INDEX_STATE_ADD;
+    while (current_search_n_ > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        LOG(INFO) << "wait search = " << current_search_n_;
+    }
+
+    ret_code_t ret = RET_CODE_OK;
+    for (uint64_t i = 0; i < n; ++i) {
+        size_t idx = 0;
+        while (FindVid(vids[i], idx)) {
+            if (idx < GetIndexPointsNum() && DeleteImpl(idx) != 0) {
+                SetError("remove datapoint from index failed");
+                ret = RET_CODE_INDEXERR;
+                break;
+            }
+            unique_lock<shared_mutex> wulk(smutex_vid_rwlock_);
+            RemoveVidAt(idx);
+        }
+        if (ret != RET_CODE_OK) {
+            break;
+        }
+    }
+
+    if (GetIndexPointsNum() > 0) {
+        current_state_ = INDEX_STATE_READY;
+    } else {
+        current_state_ = INDEX_STATE_NOINDEX;
+    }
     return ret;
 }
 
@@ -406,7 +687,7 @@ ret_code_t VQLiteIndex::TrainDefault(uint32_t nlist, int32_t nthreads)
         return TrainNew(nlist, nthreads);
     }
 
-    if (storage_type_ == STORAGE_FILE) {
+    if (storage_type_ == STORAGE_FILE && datasets_.size() / dim_ != vids_.size()) {
         std::string datasets_file_path = index_root_dir_ + "/" + datasets_filename_;
         int64_t datasets_filesize = GetFileSize(datasets_file_path);
         datasets_npoints = datasets_filesize / sizeof(float) / dim_;
@@ -427,7 +708,7 @@ ret_code_t VQLiteIndex::TrainDefault(uint32_t nlist, int32_t nthreads)
 ret_code_t VQLiteIndex::TrainNew(uint32_t nlist, int32_t nthreads)
 {
     std::vector<float> datasets, *datasets_ptr = NULL;
-    if (storage_type_ == STORAGE_FILE) {
+    if (storage_type_ == STORAGE_FILE && datasets_.size() / dim_ != vids_.size()) {
         std::string datasets_file_path = index_root_dir_ + "/" + datasets_filename_;
         int64_t datasets_filesize = GetFileSize(datasets_file_path);
         int64_t datasets_npoints = datasets_filesize / sizeof(float) / dim_;
@@ -472,7 +753,7 @@ ret_code_t VQLiteIndex::TrainAdd(int32_t nthreads)
         return RET_CODE_NOREADY;
     }
     std::vector<float> datasets, *datasets_ptr = NULL;
-    if (storage_type_ == STORAGE_FILE) {
+    if (storage_type_ == STORAGE_FILE && datasets_.size() / dim_ != vids_.size()) {
         std::string datasets_file_path = index_root_dir_ + "/" + datasets_filename_;
         int64_t datasets_filesize = GetFileSize(datasets_file_path);
         int64_t datasets_npoints = datasets_filesize / sizeof(float) / dim_;
@@ -523,8 +804,10 @@ ret_code_t VQLiteIndex::TrainAdd(int32_t nthreads)
 
 ret_code_t VQLiteIndex::Train(train_type_t train_type, uint32_t nlist, int32_t nthreads)
 {
+    auto start = std::chrono::steady_clock::now();
     if (current_state_ > INDEX_STATE_READY) {
         LOG(INFO) << "current_state_=" << current_state_;
+        SetError("index is busy");
         return RET_CODE_NOREADY;
     }
 
@@ -556,15 +839,18 @@ ret_code_t VQLiteIndex::Train(train_type_t train_type, uint32_t nlist, int32_t n
         current_state_ = INDEX_STATE_NOINDEX;
     }
 
+    last_train_ms_ = MillisecondsSince(start);
     return ret;
 }
 
 ret_code_t VQLiteIndex::TrainProcess(train_type_t train_type, uint32_t nlist, int32_t nthreads)
 {
+    auto start = std::chrono::steady_clock::now();
     is_child_process_ = true;
 
     if (current_state_ > INDEX_STATE_READY) {
         LOG(INFO) << "current_state_=" << current_state_;
+        SetError("index is busy");
         return RET_CODE_NOREADY;
     }
 
@@ -589,13 +875,16 @@ ret_code_t VQLiteIndex::TrainProcess(train_type_t train_type, uint32_t nlist, in
         current_state_ = INDEX_STATE_NOINDEX;
     }
 
+    last_train_ms_ = MillisecondsSince(start);
     return ret;
 }
 
 ret_code_t VQLiteIndex::Rebalance(const char* config_pbtxt, int32_t nthreads)
 {
+    auto start = std::chrono::steady_clock::now();
     if (current_state_ > INDEX_STATE_READY || current_state_ < INDEX_STATE_READY) {
         LOG(INFO) << "current_state_=" << current_state_;
+        SetError("rebalance requires a ready index");
         return RET_CODE_NOREADY;
     }
 
@@ -624,17 +913,20 @@ ret_code_t VQLiteIndex::Rebalance(const char* config_pbtxt, int32_t nthreads)
         current_state_ = INDEX_STATE_NOINDEX;
     }
 
+    last_rebalance_ms_ = MillisecondsSince(start);
     return ret;
 }
 
 ret_code_t VQLiteIndex::DoDump()
 {
+    auto start = std::chrono::steady_clock::now();
     std::error_code ec;
     std::string index_dir = index_root_dir_ + "/" + index_subdir_name_;
     ret_code_t ret = RET_CODE_OK;
 
     if (current_state_ > INDEX_STATE_READY) {
         LOG(INFO) << "current_state_=" << current_state_;
+        SetError("index is busy");
         return RET_CODE_NOREADY;
     }
 
@@ -647,10 +939,11 @@ ret_code_t VQLiteIndex::DoDump()
     }
     if (DumpImpl(index_dir) != 0) {
         LOG(INFO) << "Dump Index Fail.";
+        SetError("dump index failed");
         ret = RET_CODE_INDEXERR;
         goto end;
     }
-    if (storage_type_ == STORAGE_MEMORY) {
+    {
         std::string vids_file_path = index_root_dir_ + "/" + vids_filename_;
         std::ofstream outs_vids(vids_file_path, ios::out | ios::binary);
         if (!outs_vids) {
@@ -664,7 +957,8 @@ ret_code_t VQLiteIndex::DoDump()
             ret = RET_CODE_NOPERMISSION;
             goto end;
         }
-
+    }
+    if (storage_type_ == STORAGE_MEMORY || datasets_dirty_) {
         std::string datasets_file_path = index_root_dir_ + "/" + datasets_filename_;
         std::ofstream outs_datasets(datasets_file_path, ios::out | ios::binary);
         if (!outs_datasets) {
@@ -678,6 +972,8 @@ ret_code_t VQLiteIndex::DoDump()
             ret = RET_CODE_NOPERMISSION;
             goto end;
         }
+        datasets_npoints_ = datasets_.size() / dim_;
+        datasets_dirty_ = false;
     }
 
 end:
@@ -686,6 +982,7 @@ end:
     } else {
         current_state_ = INDEX_STATE_NOINDEX;
     }
+    last_dump_ms_ = MillisecondsSince(start);
     return ret;
 }
 
@@ -699,18 +996,25 @@ ret_code_t VQLiteIndex::Dump()
 }
 
 ret_code_t VQLiteIndex::Search(
-    const float* queries, int32_t len, std::vector<result_search_t>& res, params_search_t params)
+    const float* queries, uint64_t len, std::vector<result_search_t>& res, params_search_t params)
 {
     if (current_state_ == INDEX_STATE_TRAIN || current_state_ < INDEX_STATE_READY) {
         LOG(INFO) << "current_state_ = INDEX_STATE_TRAIN|INDEX_STATE_NOINDEX";
+        SetError("search requires a ready index");
         return RET_CODE_NOREADY;
     }
 
-    int32_t npoints = len / dim_;
-    if (len % dim_ != 0) {
+    if (queries == NULL || dim_ == 0 || len % dim_ != 0) {
         LOG(INFO) << "Query Len % Dim != 0";
+        SetError("invalid query length or null input");
         return RET_CODE_DATAERR;
     }
+    uint64_t npoints_u64 = len / dim_;
+    if (npoints_u64 > INT32_MAX) {
+        SetError("too many query points");
+        return RET_CODE_DATAERR;
+    }
+    int32_t npoints = static_cast<int32_t>(npoints_u64);
 
     current_search_n_++;
     int ret_s = SearchImpl(queries, npoints, res, params);
@@ -890,8 +1194,10 @@ public:
                 ret = false;
             }
         }
-        if (ret)
+        if (ret) {
+            artifact_format_ = ARTIFACT_FORMAT_LEAF_LUT16_PACKED;
             return true;
+        }
 
         std::string legacy_index_files[] = { "scann_config.pb", "ah_codebook.pb",
             "serialized_partitioner.pb", "datapoint_to_token.npy",
@@ -903,8 +1209,10 @@ public:
                 ret = false;
             }
         }
-        if (ret)
+        if (ret) {
+            artifact_format_ = ARTIFACT_FORMAT_LEGACY_HASHED;
             return true;
+        }
 
         std::string index_files_brute[]
             = { "scann_config.pb", "scann_assets.pbtxt", "dataset.npy" };
@@ -917,6 +1225,8 @@ public:
         }
         if (ret)
             is_brute_ = true;
+        if (ret)
+            artifact_format_ = ARTIFACT_FORMAT_BRUTE;
         return ret;
     }
 
@@ -1101,6 +1411,9 @@ public:
         params_search_t params) override;
     ret_code_t InitializeHealthStats() override;
     ret_code_t GetHealthStats(index_health_stats_t& stats) override;
+    std::string CurrentConfig() override;
+    int DeleteImpl(uint64_t idx) override;
+    int UpdateImpl(uint64_t idx, const float* dataset) override;
 
     size_t GetIndexPointsNum()
     {
@@ -1127,6 +1440,8 @@ public:
     }
 
     virtual bool IsBrute() override { return is_brute_; }
+    bool UseAutopilot() override { return use_autopilot_; }
+    bool EnableSoar() override { return enable_soar_; }
 
 private:
     ScannInterface* scann_handler_;
@@ -1180,10 +1495,6 @@ int VQLiteIndexScann::AddImpl(std::vector<float>& datasets, uint64_t npoints, in
     if (this->scann_handler_ == NULL) {
         return -1;
     }
-    if (is_brute_) {
-        LOG(INFO) << "Add Brute Unavailable";
-        return -2;
-    }
 
     return this->scann_handler_->Add2Index(datasets, npoints, nthreads);
 }
@@ -1221,6 +1532,7 @@ int VQLiteIndexScann::TrainImpl(
         delete this->scann_handler_;
     }
     this->scann_handler_ = scann_handler;
+    artifact_format_ = is_brute_ ? ARTIFACT_FORMAT_BRUTE : ARTIFACT_FORMAT_LEAF_LUT16_PACKED;
     LOG(INFO) << "index npoints=" << GetIndexPointsNum() << "; default_nlist=" << nlist
               << "; is_brute=" << is_brute_;
     return 0;
@@ -1253,6 +1565,7 @@ int VQLiteIndexScann::RebalanceImpl(const std::string& config_pbtxt, int32_t nth
         return -1;
     }
     is_brute_ = ret->has_brute_force();
+    artifact_format_ = is_brute_ ? ARTIFACT_FORMAT_BRUTE : ARTIFACT_FORMAT_LEAF_LUT16_PACKED;
     LOG(INFO) << "rebalance done; index npoints=" << GetIndexPointsNum()
               << "; is_brute=" << is_brute_;
     return 0;
@@ -1281,12 +1594,41 @@ int VQLiteIndexScann::DumpImpl(std::string& index_dir)
         }
     }
     if (wrote_packed_lut16) {
+        artifact_format_ = ARTIFACT_FORMAT_LEAF_LUT16_PACKED;
         std::error_code ec;
         std::filesystem::remove(index_dir + "/hashed_dataset.npy", ec);
         ec.clear();
         std::filesystem::remove(index_dir + "/hashed_dataset_soar.npy", ec);
+    } else if (is_brute_) {
+        artifact_format_ = ARTIFACT_FORMAT_BRUTE;
+    } else {
+        artifact_format_ = ARTIFACT_FORMAT_LEGACY_HASHED;
     }
     return 0;
+}
+
+std::string VQLiteIndexScann::CurrentConfig()
+{
+    if (scann_handler_ == NULL) {
+        return std::string();
+    }
+    return scann_handler_->CurrentConfig();
+}
+
+int VQLiteIndexScann::DeleteImpl(uint64_t idx)
+{
+    if (scann_handler_ == NULL) {
+        return -1;
+    }
+    return scann_handler_->RemoveFromIndex(static_cast<DatapointIndex>(idx));
+}
+
+int VQLiteIndexScann::UpdateImpl(uint64_t idx, const float* dataset)
+{
+    if (scann_handler_ == NULL) {
+        return -1;
+    }
+    return scann_handler_->UpdateInIndex(static_cast<DatapointIndex>(idx), dataset);
 }
 
 ret_code_t VQLiteIndexScann::InitializeHealthStats()
@@ -1403,24 +1745,46 @@ ret_code_t vqindex_dump(void* vql_handler)
     VQLiteIndex* vql_index = static_cast<VQLiteIndex*>(vql_handler);
     if (vql_index == NULL) {
         LOG(INFO) << "vql_handler NULL";
+        g_last_error = "vql_handler NULL";
         return RET_CODE_NOINIT;
     }
     return vql_index->Dump();
 }
 
+ret_code_t vqindex_flush(void* vql_handler)
+{
+    return vqindex_dump(vql_handler);
+}
+
 // topk=>final_nn, reorder_topk=>pre_reorder_nn, nprobe=>leaves
 ret_code_t vqindex_search(
-    void* vql_handler, const float* queries, int len, result_search_t* res, params_search_t params)
+    void* vql_handler, const float* queries, uint64_t len, result_search_t* res,
+    uint64_t res_capacity, uint64_t* res_count, params_search_t params)
 {
     VQLiteIndex* vql_index = static_cast<VQLiteIndex*>(vql_handler);
     if (vql_index == NULL) {
         LOG(INFO) << "vql_handler NULL";
+        g_last_error = "vql_handler NULL";
         return RET_CODE_NOINIT;
+    }
+    if (res_count == NULL) {
+        vql_index->SetError("res_count is null");
+        return RET_CODE_MEMORYERR;
+    }
+    *res_count = 0;
+    if (res == NULL && res_capacity > 0) {
+        vql_index->SetError("result buffer is null");
+        return RET_CODE_MEMORYERR;
     }
 
     std::vector<result_search_t> res_t;
     ret_code_t ret_s = vql_index->Search(queries, len, res_t, params);
     if (ret_s == RET_CODE_OK) {
+        *res_count = res_t.size();
+        if (res_t.size() > res_capacity) {
+            vql_index->SetError("result buffer capacity is too small");
+            return RET_CODE_MEMORYERR;
+        }
         memcpy(res, res_t.data(), res_t.size() * sizeof(result_search_t));
     }
     return ret_s;
@@ -1432,9 +1796,37 @@ ret_code_t vqindex_add(void* vql_handler, const float* datasets, uint64_t len, c
     VQLiteIndex* vql_index = static_cast<VQLiteIndex*>(vql_handler);
     if (vql_index == NULL) {
         LOG(INFO) << "vql_handler NULL";
+        g_last_error = "vql_handler NULL";
         return RET_CODE_NOINIT;
     }
     return vql_index->AddDatasets(datasets, len, vids);
+}
+
+ret_code_t vqindex_insert(void* vql_handler, const float* datasets, uint64_t len, const int64_t* vids)
+{
+    return vqindex_add(vql_handler, datasets, len, vids);
+}
+
+ret_code_t vqindex_upsert(void* vql_handler, const float* datasets, uint64_t len, const int64_t* vids)
+{
+    VQLiteIndex* vql_index = static_cast<VQLiteIndex*>(vql_handler);
+    if (vql_index == NULL) {
+        LOG(INFO) << "vql_handler NULL";
+        g_last_error = "vql_handler NULL";
+        return RET_CODE_NOINIT;
+    }
+    return vql_index->UpsertDatasets(datasets, len, vids);
+}
+
+ret_code_t vqindex_delete(void* vql_handler, const int64_t* vids, uint64_t n)
+{
+    VQLiteIndex* vql_index = static_cast<VQLiteIndex*>(vql_handler);
+    if (vql_index == NULL) {
+        LOG(INFO) << "vql_handler NULL";
+        g_last_error = "vql_handler NULL";
+        return RET_CODE_NOINIT;
+    }
+    return vql_index->DeleteVids(vids, n);
 }
 
 ret_code_t vqindex_train(
@@ -1443,6 +1835,7 @@ ret_code_t vqindex_train(
     VQLiteIndex* vql_index = static_cast<VQLiteIndex*>(vql_handler);
     if (vql_index == NULL) {
         LOG(INFO) << "vql_handler NULL";
+        g_last_error = "vql_handler NULL";
         return RET_CODE_NOINIT;
     }
     return vql_index->Train(train_type, nlist, nthreads);
@@ -1458,6 +1851,7 @@ ret_code_t vqindex_train_process(
     VQLiteIndex *vql_index = static_cast<VQLiteIndex *>(vql_handler);
     if (vql_index == NULL) {
         LOG(INFO) << "vql_handler NULL";
+        g_last_error = "vql_handler NULL";
         return RET_CODE_NOINIT;
     }
 
@@ -1502,6 +1896,15 @@ index_stats_t vqindex_stats(void* vql_handler)
     ret.is_brute_ = 0;
     ret.brute_threshold_ = 0;
     ret.current_status_ = INDEX_STATE_NONE;
+    ret.pending_size_ = 0;
+    ret.deleted_size_ = 0;
+    ret.last_load_ms_ = 0;
+    ret.last_dump_ms_ = 0;
+    ret.last_train_ms_ = 0;
+    ret.last_rebalance_ms_ = 0;
+    ret.artifact_format_ = ARTIFACT_FORMAT_UNKNOWN;
+    ret.use_autopilot_ = 0;
+    ret.enable_soar_ = 0;
 
     VQLiteIndex* vql_index = static_cast<VQLiteIndex*>(vql_handler);
     if (vql_index == NULL) {
@@ -1514,11 +1917,45 @@ index_stats_t vqindex_stats(void* vql_handler)
     return ret;
 }
 
+ret_code_t vqindex_last_error(void* vql_handler, char* error_msg, uint64_t error_msg_len)
+{
+    VQLiteIndex* vql_index = static_cast<VQLiteIndex*>(vql_handler);
+    const std::string& error = vql_index == NULL ? g_last_error : vql_index->LastError();
+    return CopyStringToBuffer(error, error_msg, error_msg_len);
+}
+
+ret_code_t vqindex_clear_error(void* vql_handler)
+{
+    VQLiteIndex* vql_index = static_cast<VQLiteIndex*>(vql_handler);
+    if (vql_index == NULL) {
+        g_last_error.clear();
+        return RET_CODE_OK;
+    }
+    vql_index->ClearError();
+    return RET_CODE_OK;
+}
+
+ret_code_t vqindex_version(char* version, uint64_t version_len)
+{
+    return CopyStringToBuffer(
+        "vqindex_api=2;scann=google-research-current;artifact=leaf_lut16_packed",
+        version, version_len);
+}
+
+ret_code_t vqindex_capabilities(char* capabilities, uint64_t capabilities_len)
+{
+    return CopyStringToBuffer(
+        "packed_lut16=1;legacy_hashed_load=1;flush=1;insert=1;upsert=1;delete=1;"
+        "last_error=1;current_config=1;autopilot=1;soar=1;health_stats=1",
+        capabilities, capabilities_len);
+}
+
 ret_code_t vqindex_set_tuning(void* vql_handler, index_tuning_config_t tuning)
 {
     VQLiteIndex* vql_index = static_cast<VQLiteIndex*>(vql_handler);
     if (vql_index == NULL) {
         LOG(INFO) << "vql_handler NULL";
+        g_last_error = "vql_handler NULL";
         return RET_CODE_NOINIT;
     }
     return vql_index->SetTuning(tuning);
@@ -1547,6 +1984,18 @@ ret_code_t vqindex_suggest_config(
     }
     memcpy(config_pbtxt, config.c_str(), config.size() + 1);
     return RET_CODE_OK;
+}
+
+ret_code_t vqindex_current_config(
+    void* vql_handler, char* config_pbtxt, uint64_t config_pbtxt_len)
+{
+    VQLiteIndex* vql_index = static_cast<VQLiteIndex*>(vql_handler);
+    if (vql_index == NULL) {
+        LOG(INFO) << "vql_handler NULL";
+        g_last_error = "vql_handler NULL";
+        return RET_CODE_NOINIT;
+    }
+    return CopyStringToBuffer(vql_index->CurrentConfig(), config_pbtxt, config_pbtxt_len);
 }
 
 ret_code_t vqindex_rebalance(void* vql_handler, const char* config_pbtxt, int32_t nthreads)

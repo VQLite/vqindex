@@ -478,6 +478,89 @@ int ScannInterface::Add2Index(std::vector<float>& dataset, uint32_t npoints,
   return 0;
 }
 
+int ScannInterface::RemoveFromIndex(DatapointIndex idx) {
+  if (idx >= n_points()) {
+    LOG(INFO) << "RemoveFromIndex index out of range: " << idx
+              << " >= " << n_points();
+    return -1;
+  }
+
+  auto mutator_or = GetMutator();
+  if (!mutator_or.ok()) {
+    LOG(INFO) << "GetMutator failed: " << mutator_or.status().message();
+    return -1;
+  }
+
+  auto status = mutator_or.value()->RemoveDatapoint(idx);
+  if (!status.ok()) {
+    LOG(INFO) << "RemoveDatapoint failed: " << status.message();
+    return -1;
+  }
+
+  auto maintenance_or = mutator_or.value()->IncrementalMaintenance();
+  if (!maintenance_or.ok()) {
+    LOG(INFO) << "IncrementalMaintenance failed: "
+              << maintenance_or.status().message();
+    return -1;
+  }
+  if (maintenance_or.value().has_value()) {
+    config_ = maintenance_or.value().value();
+  }
+  auto health_status = scann_->InitializeHealthStats();
+  if (!health_status.ok()) {
+    LOG(INFO) << "InitializeHealthStats failed: " << health_status.message();
+    return -1;
+  }
+  return 0;
+}
+
+int ScannInterface::UpdateInIndex(DatapointIndex idx, const float* values) {
+  if (idx >= n_points()) {
+    LOG(INFO) << "UpdateInIndex index out of range: " << idx
+              << " >= " << n_points();
+    return -1;
+  }
+  if (values == nullptr) return -1;
+
+  auto mutator_or = GetMutator();
+  if (!mutator_or.ok()) {
+    LOG(INFO) << "GetMutator failed: " << mutator_or.status().message();
+    return -1;
+  }
+
+  std::vector<float> dataset(values, values + dimensionality_);
+  DenseDataset<float> update_dataset(std::move(dataset), 1);
+  auto status_or_idx =
+      mutator_or.value()->UpdateDatapoint(update_dataset[0], idx);
+  if (!status_or_idx.ok()) {
+    LOG(INFO) << "UpdateDatapoint failed: "
+              << status_or_idx.status().message();
+    return -1;
+  }
+
+  auto maintenance_or = mutator_or.value()->IncrementalMaintenance();
+  if (!maintenance_or.ok()) {
+    LOG(INFO) << "IncrementalMaintenance failed: "
+              << maintenance_or.status().message();
+    return -1;
+  }
+  if (maintenance_or.value().has_value()) {
+    config_ = maintenance_or.value().value();
+  }
+  auto health_status = scann_->InitializeHealthStats();
+  if (!health_status.ok()) {
+    LOG(INFO) << "InitializeHealthStats failed: " << health_status.message();
+    return -1;
+  }
+  return 0;
+}
+
+std::string ScannInterface::CurrentConfig() const {
+  std::string config_text;
+  google::protobuf::TextFormat::PrintToString(config_, &config_text);
+  return config_text;
+}
+
 SearchParameters ScannInterface::GetSearchParameters(int final_nn,
                                                      int pre_reorder_nn,
                                                      int leaves) const {

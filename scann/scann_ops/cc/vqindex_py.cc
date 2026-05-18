@@ -94,9 +94,11 @@ static PyObject* _vqlite_search(PyObject* self, PyObject* args)
     params.reorder_topk_ = reorder_topk;
     params.topk_ = topk;
     int ret_state = 0;
+    uint64_t result_count = 0;
     Py_BEGIN_ALLOW_THREADS;
     ret_state
-        = vqindex_search(vql_handler, query_vec.data(), query_vec.size(), res.data(), params);
+        = vqindex_search(vql_handler, query_vec.data(), query_vec.size(), res.data(),
+            res.size(), &result_count, params);
     Py_END_ALLOW_THREADS;
 
     if (ret_state != RET_CODE_OK) {

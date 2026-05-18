@@ -52,6 +52,13 @@ typedef enum {
     RET_CODE_NOINIT = -8
 } ret_code_t;
 
+typedef enum {
+    ARTIFACT_FORMAT_UNKNOWN = 0,
+    ARTIFACT_FORMAT_BRUTE = 1,
+    ARTIFACT_FORMAT_LEAF_LUT16_PACKED = 2,
+    ARTIFACT_FORMAT_LEGACY_HASHED = 3
+} artifact_format_t;
+
 struct index_config_s {
     index_type_t index_type_; // index type
     uint32_t dim_; // dimensions of vector point
@@ -86,6 +93,15 @@ struct index_stats_s {
     int32_t dim_;
     int8_t is_brute_;
     index_state_t current_status_;
+    int64_t pending_size_;
+    int64_t deleted_size_;
+    int64_t last_load_ms_;
+    int64_t last_dump_ms_;
+    int64_t last_train_ms_;
+    int64_t last_rebalance_ms_;
+    artifact_format_t artifact_format_;
+    int8_t use_autopilot_;
+    int8_t enable_soar_;
 };
 typedef struct index_stats_s index_stats_t;
 
@@ -117,6 +133,8 @@ void vqindex_release(void *vql_handler);
 
 ret_code_t vqindex_dump(void *vql_handler);
 
+ret_code_t vqindex_flush(void *vql_handler);
+
 // if nlist=0, use default nlist, it's only available to New[train_type].
 // nlist: number of partitioning leaves, If a dataset has n points,
 // the number of partitions should generally be the same order
@@ -135,17 +153,37 @@ ret_code_t vqindex_train_process(
 ret_code_t vqindex_add(
         void *vql_handler, const float *datasets, uint64_t len, const int64_t *vids);
 
+ret_code_t vqindex_insert(
+        void *vql_handler, const float *datasets, uint64_t len, const int64_t *vids);
+
+ret_code_t vqindex_upsert(
+        void *vql_handler, const float *datasets, uint64_t len, const int64_t *vids);
+
+ret_code_t vqindex_delete(void *vql_handler, const int64_t *vids, uint64_t n);
+
 // len: number of queries float, <len % dim_ == 0>
 ret_code_t vqindex_search(
-        void *vql_handler, const float *queries, int len, result_search_t *res, params_search_t params);
+        void *vql_handler, const float *queries, uint64_t len, result_search_t *res,
+        uint64_t res_capacity, uint64_t *res_count, params_search_t params);
 
 index_stats_t vqindex_stats(void *vql_handler);
+
+ret_code_t vqindex_last_error(void *vql_handler, char *error_msg, uint64_t error_msg_len);
+
+ret_code_t vqindex_clear_error(void *vql_handler);
+
+ret_code_t vqindex_version(char *version, uint64_t version_len);
+
+ret_code_t vqindex_capabilities(char *capabilities, uint64_t capabilities_len);
 
 ret_code_t vqindex_set_tuning(void *vql_handler, index_tuning_config_t tuning);
 
 ret_code_t vqindex_suggest_config(
         void *vql_handler, uint64_t dataset_size, uint32_t nlist,
         char *config_pbtxt, uint64_t config_pbtxt_len);
+
+ret_code_t vqindex_current_config(
+        void *vql_handler, char *config_pbtxt, uint64_t config_pbtxt_len);
 
 ret_code_t vqindex_rebalance(void *vql_handler, const char *config_pbtxt, int32_t nthreads);
 

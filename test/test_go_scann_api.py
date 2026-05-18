@@ -72,6 +72,15 @@ class IndexStats(ctypes.Structure):
         ("dim_", ctypes.c_int32),
         ("is_brute_", ctypes.c_int8),
         ("current_status_", ctypes.c_int),
+        ("pending_size_", ctypes.c_int64),
+        ("deleted_size_", ctypes.c_int64),
+        ("last_load_ms_", ctypes.c_int64),
+        ("last_dump_ms_", ctypes.c_int64),
+        ("last_train_ms_", ctypes.c_int64),
+        ("last_rebalance_ms_", ctypes.c_int64),
+        ("artifact_format_", ctypes.c_int),
+        ("use_autopilot_", ctypes.c_int8),
+        ("enable_soar_", ctypes.c_int8),
     ]
 
 
@@ -115,6 +124,16 @@ def load_library() -> ctypes.CDLL:
         ctypes.POINTER(ctypes.c_int64),
     ]
     lib.vqindex_add.restype = ctypes.c_int
+    lib.vqindex_insert.argtypes = lib.vqindex_add.argtypes
+    lib.vqindex_insert.restype = ctypes.c_int
+    lib.vqindex_upsert.argtypes = lib.vqindex_add.argtypes
+    lib.vqindex_upsert.restype = ctypes.c_int
+    lib.vqindex_delete.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_int64),
+        ctypes.c_uint64,
+    ]
+    lib.vqindex_delete.restype = ctypes.c_int
     lib.vqindex_train.argtypes = [
         ctypes.c_void_p,
         ctypes.c_int,
@@ -125,13 +144,25 @@ def load_library() -> ctypes.CDLL:
     lib.vqindex_search.argtypes = [
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_float),
-        ctypes.c_int,
+        ctypes.c_uint64,
         ctypes.POINTER(ResultSearch),
+        ctypes.c_uint64,
+        ctypes.POINTER(ctypes.c_uint64),
         ParamsSearch,
     ]
     lib.vqindex_search.restype = ctypes.c_int
     lib.vqindex_dump.argtypes = [ctypes.c_void_p]
     lib.vqindex_dump.restype = ctypes.c_int
+    lib.vqindex_flush.argtypes = [ctypes.c_void_p]
+    lib.vqindex_flush.restype = ctypes.c_int
+    lib.vqindex_last_error.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint64]
+    lib.vqindex_last_error.restype = ctypes.c_int
+    lib.vqindex_clear_error.argtypes = [ctypes.c_void_p]
+    lib.vqindex_clear_error.restype = ctypes.c_int
+    lib.vqindex_version.argtypes = [ctypes.c_char_p, ctypes.c_uint64]
+    lib.vqindex_version.restype = ctypes.c_int
+    lib.vqindex_capabilities.argtypes = [ctypes.c_char_p, ctypes.c_uint64]
+    lib.vqindex_capabilities.restype = ctypes.c_int
     lib.vqindex_stats.argtypes = [ctypes.c_void_p]
     lib.vqindex_stats.restype = IndexStats
     lib.vqindex_set_tuning.argtypes = [ctypes.c_void_p, IndexTuningConfig]
@@ -144,6 +175,12 @@ def load_library() -> ctypes.CDLL:
         ctypes.c_uint64,
     ]
     lib.vqindex_suggest_config.restype = ctypes.c_int
+    lib.vqindex_current_config.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_uint64,
+    ]
+    lib.vqindex_current_config.restype = ctypes.c_int
     lib.vqindex_rebalance.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int32]
     lib.vqindex_rebalance.restype = ctypes.c_int
     lib.vqindex_initialize_health_stats.argtypes = [ctypes.c_void_p]
@@ -188,6 +225,16 @@ def add_vectors(
     assert_ok(lib.vqindex_add(handler, data, len(flat), vid_data), "add")
 
 
+def upsert_vectors(
+    lib: ctypes.CDLL, handler: ctypes.c_void_p, vectors: list[list[float]], vids: list[int]
+) -> None:
+    assert len(vectors) == len(vids)
+    flat = flatten(vectors)
+    data = (ctypes.c_float * len(flat))(*flat)
+    vid_data = (ctypes.c_int64 * len(vids))(*vids)
+    assert_ok(lib.vqindex_upsert(handler, data, len(flat), vid_data), "upsert")
+
+
 def search_one(
     lib: ctypes.CDLL,
     handler: ctypes.c_void_p,
@@ -198,9 +245,15 @@ def search_one(
 ) -> list[ResultSearch]:
     query = (ctypes.c_float * len(vector))(*vector)
     result = (ResultSearch * topk)()
+    result_count = ctypes.c_uint64(0)
     params = ParamsSearch(topk_=topk, reorder_topk_=reorder_topk, nprobe_=nprobe)
-    assert_ok(lib.vqindex_search(handler, query, len(vector), result, params), "search")
-    return [result[i] for i in range(topk) if result[i].score_ >= 0]
+    assert_ok(
+        lib.vqindex_search(
+            handler, query, len(vector), result, topk, ctypes.byref(result_count), params
+        ),
+        "search",
+    )
+    return [result[i] for i in range(min(topk, result_count.value)) if result[i].score_ >= 0]
 
 
 def init_index(lib: ctypes.CDLL, index_dir: Path, dim: int) -> ctypes.c_void_p:
@@ -215,6 +268,7 @@ def assert_stats(stats: IndexStats, *, dataset_size: int, index_size: int, dim: 
     assert stats.index_size_ == index_size, stats.index_size_
     assert stats.dim_ == dim, stats.dim_
     assert stats.brute_threshold_ == 4096, stats.brute_threshold_
+    assert stats.pending_size_ == max(dataset_size - index_size, 0), stats.pending_size_
 
 
 def suggest_config(
@@ -225,6 +279,18 @@ def suggest_config(
         lib.vqindex_suggest_config(handler, dataset_size, nlist, buf, len(buf)),
         "suggest config",
     )
+    return buf.value.decode("utf-8")
+
+
+def current_config(lib: ctypes.CDLL, handler: ctypes.c_void_p) -> str:
+    buf = ctypes.create_string_buffer(1 << 20)
+    assert_ok(lib.vqindex_current_config(handler, buf, len(buf)), "current config")
+    return buf.value.decode("utf-8")
+
+
+def get_global_string(lib: ctypes.CDLL, func_name: str) -> str:
+    buf = ctypes.create_string_buffer(4096)
+    assert_ok(getattr(lib, func_name)(buf, len(buf)), func_name)
     return buf.value.decode("utf-8")
 
 
@@ -340,14 +406,22 @@ def main() -> None:
     base_count = 9000
     target_vid = 424242
     added_vid = 424243
+    upsert_vid = 424244
 
     rng = random.Random(20260515)
     base_vectors = [unit_vector(rng, dim) for _ in range(base_count)]
     base_vids = [100000 + i for i in range(base_count)]
     target_vector = unit_vector(rng, dim)
+    updated_target_vector = unit_vector(rng, dim)
     added_vector = unit_vector(rng, dim)
+    upsert_vector = unit_vector(rng, dim)
 
     lib = load_library()
+    assert "vqindex_api=2" in get_global_string(lib, "vqindex_version")
+    capabilities = get_global_string(lib, "vqindex_capabilities")
+    for capability in ("upsert=1", "delete=1", "current_config=1"):
+        assert capability in capabilities, capabilities
+
     index_dir = Path(tempfile.mkdtemp(prefix="vqindex-go-scann-api-"))
     keep_dir = os.environ.get("KEEP_VQINDEX_TEST_DIR")
     handler = None
@@ -369,6 +443,8 @@ def main() -> None:
         assert stats.current_status_ == INDEX_STATE_READY, stats.current_status_
         assert stats.index_nlist_ > 0, stats.index_nlist_
         assert stats.is_brute_ == 0, stats.is_brute_
+        assert stats.last_train_ms_ >= 0, stats.last_train_ms_
+        assert current_config(lib, handler)
 
         results = search_one(lib, handler, target_vector)
         assert results, "expected at least one search result"
@@ -405,6 +481,8 @@ def main() -> None:
         assert_stats(stats, dataset_size=base_count + 1, index_size=base_count + 1, dim=dim)
         results = search_one(lib, handler, target_vector, topk=10, reorder_topk=64, nprobe=32)
         assert results[0].vid_ == target_vid, results[0].vid_
+        assert stats.use_autopilot_ == 1, stats.use_autopilot_
+        assert stats.enable_soar_ == 1, stats.enable_soar_
 
         assert_ok(lib.vqindex_dump(handler), "dump")
         assert (index_dir / "datasets.vql").exists()
@@ -433,6 +511,31 @@ def main() -> None:
         assert (index_dir / "index" / "leaf_lut16_packed_meta.npy").exists()
         assert not (index_dir / "index" / "hashed_dataset.npy").exists()
         assert not (index_dir / "index" / "hashed_dataset_soar.npy").exists()
+
+        upsert_vectors(lib, handler, [updated_target_vector], [target_vid])
+        results = search_one(lib, handler, updated_target_vector)
+        assert results and results[0].vid_ == target_vid, results[0].vid_
+
+        upsert_vectors(lib, handler, [upsert_vector], [upsert_vid])
+        results = search_one(lib, handler, upsert_vector)
+        assert results and results[0].vid_ == upsert_vid, results[0].vid_
+        delete_vids = (ctypes.c_int64 * 1)(upsert_vid)
+        assert_ok(lib.vqindex_delete(handler, delete_vids, 1), "delete")
+        results = search_one(lib, handler, upsert_vector)
+        assert all(item.vid_ != upsert_vid for item in results), [item.vid_ for item in results]
+        stats = lib.vqindex_stats(handler)
+        assert stats.vid_size_ == base_count + 1, stats.vid_size_
+        assert stats.index_size_ == base_count + 1, stats.index_size_
+        assert stats.deleted_size_ >= 1, stats.deleted_size_
+        assert_ok(lib.vqindex_flush(handler), "flush after upsert/delete")
+
+        lib.vqindex_release(handler)
+        handler = None
+        handler = init_index(lib, index_dir, dim)
+        results = search_one(lib, handler, updated_target_vector)
+        assert results and results[0].vid_ == target_vid, results[0].vid_
+        results = search_one(lib, handler, upsert_vector)
+        assert all(item.vid_ != upsert_vid for item in results), [item.vid_ for item in results]
 
         add_vectors(lib, handler, [added_vector], [added_vid])
         stats = lib.vqindex_stats(handler)
