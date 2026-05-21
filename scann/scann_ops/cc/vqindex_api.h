@@ -94,7 +94,6 @@ struct index_stats_s {
     int8_t is_brute_;
     index_state_t current_status_;
     int64_t pending_size_;
-    int64_t deleted_size_;
     int64_t last_load_ms_;
     int64_t last_dump_ms_;
     int64_t last_train_ms_;
@@ -155,11 +154,6 @@ ret_code_t vqindex_add(
 
 ret_code_t vqindex_insert(
         void *vql_handler, const float *datasets, uint64_t len, const int64_t *vids);
-
-ret_code_t vqindex_upsert(
-        void *vql_handler, const float *datasets, uint64_t len, const int64_t *vids);
-
-ret_code_t vqindex_delete(void *vql_handler, const int64_t *vids, uint64_t n);
 
 // len: number of queries float, <len % dim_ == 0>
 ret_code_t vqindex_search(

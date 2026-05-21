@@ -73,7 +73,6 @@ class IndexStats(ctypes.Structure):
         ("is_brute_", ctypes.c_int8),
         ("current_status_", ctypes.c_int),
         ("pending_size_", ctypes.c_int64),
-        ("deleted_size_", ctypes.c_int64),
         ("last_load_ms_", ctypes.c_int64),
         ("last_dump_ms_", ctypes.c_int64),
         ("last_train_ms_", ctypes.c_int64),
@@ -126,14 +125,6 @@ def load_library() -> ctypes.CDLL:
     lib.vqindex_add.restype = ctypes.c_int
     lib.vqindex_insert.argtypes = lib.vqindex_add.argtypes
     lib.vqindex_insert.restype = ctypes.c_int
-    lib.vqindex_upsert.argtypes = lib.vqindex_add.argtypes
-    lib.vqindex_upsert.restype = ctypes.c_int
-    lib.vqindex_delete.argtypes = [
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_int64),
-        ctypes.c_uint64,
-    ]
-    lib.vqindex_delete.restype = ctypes.c_int
     lib.vqindex_train.argtypes = [
         ctypes.c_void_p,
         ctypes.c_int,
@@ -223,16 +214,6 @@ def add_vectors(
     data = (ctypes.c_float * len(flat))(*flat)
     vid_data = (ctypes.c_int64 * len(vids))(*vids)
     assert_ok(lib.vqindex_add(handler, data, len(flat), vid_data), "add")
-
-
-def upsert_vectors(
-    lib: ctypes.CDLL, handler: ctypes.c_void_p, vectors: list[list[float]], vids: list[int]
-) -> None:
-    assert len(vectors) == len(vids)
-    flat = flatten(vectors)
-    data = (ctypes.c_float * len(flat))(*flat)
-    vid_data = (ctypes.c_int64 * len(vids))(*vids)
-    assert_ok(lib.vqindex_upsert(handler, data, len(flat), vid_data), "upsert")
 
 
 def search_one(
@@ -406,21 +387,20 @@ def main() -> None:
     base_count = 9000
     target_vid = 424242
     added_vid = 424243
-    upsert_vid = 424244
 
     rng = random.Random(20260515)
     base_vectors = [unit_vector(rng, dim) for _ in range(base_count)]
     base_vids = [100000 + i for i in range(base_count)]
     target_vector = unit_vector(rng, dim)
-    updated_target_vector = unit_vector(rng, dim)
     added_vector = unit_vector(rng, dim)
-    upsert_vector = unit_vector(rng, dim)
 
     lib = load_library()
-    assert "vqindex_api=2" in get_global_string(lib, "vqindex_version")
+    assert "vqindex_api=3" in get_global_string(lib, "vqindex_version")
     capabilities = get_global_string(lib, "vqindex_capabilities")
-    for capability in ("upsert=1", "delete=1", "current_config=1"):
+    for capability in ("insert=1", "current_config=1"):
         assert capability in capabilities, capabilities
+    assert "upsert=1" not in capabilities, capabilities
+    assert "delete=1" not in capabilities, capabilities
 
     index_dir = Path(tempfile.mkdtemp(prefix="vqindex-go-scann-api-"))
     keep_dir = os.environ.get("KEEP_VQINDEX_TEST_DIR")
@@ -511,31 +491,6 @@ def main() -> None:
         assert (index_dir / "index" / "leaf_lut16_packed_meta.npy").exists()
         assert not (index_dir / "index" / "hashed_dataset.npy").exists()
         assert not (index_dir / "index" / "hashed_dataset_soar.npy").exists()
-
-        upsert_vectors(lib, handler, [updated_target_vector], [target_vid])
-        results = search_one(lib, handler, updated_target_vector)
-        assert results and results[0].vid_ == target_vid, results[0].vid_
-
-        upsert_vectors(lib, handler, [upsert_vector], [upsert_vid])
-        results = search_one(lib, handler, upsert_vector)
-        assert results and results[0].vid_ == upsert_vid, results[0].vid_
-        delete_vids = (ctypes.c_int64 * 1)(upsert_vid)
-        assert_ok(lib.vqindex_delete(handler, delete_vids, 1), "delete")
-        results = search_one(lib, handler, upsert_vector)
-        assert all(item.vid_ != upsert_vid for item in results), [item.vid_ for item in results]
-        stats = lib.vqindex_stats(handler)
-        assert stats.vid_size_ == base_count + 1, stats.vid_size_
-        assert stats.index_size_ == base_count + 1, stats.index_size_
-        assert stats.deleted_size_ >= 1, stats.deleted_size_
-        assert_ok(lib.vqindex_flush(handler), "flush after upsert/delete")
-
-        lib.vqindex_release(handler)
-        handler = None
-        handler = init_index(lib, index_dir, dim)
-        results = search_one(lib, handler, updated_target_vector)
-        assert results and results[0].vid_ == target_vid, results[0].vid_
-        results = search_one(lib, handler, upsert_vector)
-        assert all(item.vid_ != upsert_vid for item in results), [item.vid_ for item in results]
 
         add_vectors(lib, handler, [added_vector], [added_vid])
         stats = lib.vqindex_stats(handler)

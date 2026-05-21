@@ -80,7 +80,6 @@ class IndexStats(ctypes.Structure):
         ("is_brute_", ctypes.c_int8),
         ("current_status_", ctypes.c_int),
         ("pending_size_", ctypes.c_int64),
-        ("deleted_size_", ctypes.c_int64),
         ("last_load_ms_", ctypes.c_int64),
         ("last_dump_ms_", ctypes.c_int64),
         ("last_train_ms_", ctypes.c_int64),

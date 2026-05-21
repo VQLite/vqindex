@@ -108,8 +108,6 @@ class ScannInterface {
 
   int Add2Index(std::vector<float>& dataset, uint32_t npoints,
                 int32_t nthreads);
-  int RemoveFromIndex(DatapointIndex idx);
-  int UpdateInIndex(DatapointIndex idx, const float* values);
   std::string CurrentConfig() const;
 
   size_t GetPartitioningSize() const { return scann_->NumPartitions(); }
