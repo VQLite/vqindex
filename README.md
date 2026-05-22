@@ -5,6 +5,10 @@ A simple vector search library based on the latest Google ScaNN, it only support
 This fork keeps the existing `vqindex_api.h` C ABI used by VQLite and wraps
 ScaNN with add/train/search/dump/stats APIs.
 
+For the fork-specific C API contract, artifact format, tuning hooks, and
+regression test checklist, see
+[`docs/vqlite_integration.md`](docs/vqlite_integration.md).
+
 ## Build requirements
 
 VQIndex builds only the ScaNN C++ core and does not require TensorFlow. Latest
@@ -66,7 +70,8 @@ It will build "libs/libvqindex_api.so", you can use the "vqindex_api.h" for deve
 python3 test/test_go_scann_api.py
 ```
 This test mirrors the Go wrapper in VQLite: file-backed storage, default
-training, search, dump/reload, and incremental add/train/search.
+training, search, dump/reload, packed artifact handling, legacy hashed artifact
+loading, tuning, SOAR, health stats, and incremental add/train/search.
 
 ## Standard ScaNN example benchmark
 Use the upstream ScaNN `docs/example.ipynb` GloVe-100 angular flow as the

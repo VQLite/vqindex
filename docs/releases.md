@@ -1,5 +1,44 @@
 # ScaNN Release Notes
 
+## VQIndex fork notes
+
+These notes describe the VQLite-facing fork changes on top of upstream ScaNN.
+For API and operational details, see
+[`docs/vqlite_integration.md`](vqlite_integration.md).
+
+### Current VQIndex ScaNN wrapper
+
+The VQIndex wrapper has been updated from the older VQLite ScaNN baseline to a
+current Google ScaNN core and no longer requires TensorFlow for the C++ runtime
+library. The build now uses Bazel 7.x, downloads Bazel automatically when
+needed, and defaults to native CPU optimization plus Highway multi-target
+dispatch.
+
+Important wrapper changes:
+
+- `vqindex_search` now takes `res_capacity` and returns `res_count` to avoid
+  unchecked writes into caller-owned result buffers.
+- `index_stats_t` includes load/dump/train/rebalance timings, pending size,
+  artifact format, autopilot status, and SOAR status.
+- `vqindex_last_error`, `vqindex_version`, `vqindex_capabilities`,
+  `vqindex_set_tuning`, `vqindex_suggest_config`, `vqindex_current_config`,
+  `vqindex_rebalance`, `vqindex_initialize_health_stats`, and
+  `vqindex_health_stats` are exposed.
+- Tree-AH dump/load now prefers packed LUT16 leaf artifacts:
+  `leaf_lut16_packed_dataset.npy` and `leaf_lut16_packed_meta.npy`.
+- Legacy `hashed_dataset.npy` indexes still load when packed artifacts are not
+  present, but future dumps rewrite to packed artifacts.
+- Live delete/upsert mutation APIs are intentionally not exposed. The VQLite
+  layer should continue using tombstones above ScaNN.
+
+The standard regression set for wrapper changes is:
+
+```bash
+./build.sh vqindex_api
+python3 test/test_go_scann_api.py
+test/run_scann_example_benchmark.sh
+```
+
 ### 1.4.2
 
 Added support for Python 3.13, and reintroduced ARM binaries.
