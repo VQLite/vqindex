@@ -33,6 +33,8 @@ INDEX_STATE_NOINDEX = 2
 INDEX_STATE_READY = 3
 
 RET_CODE_OK = 0
+RET_CODE_NOREADY = -2
+RET_CODE_MEMORYERR = -3
 
 
 class IndexConfig(ctypes.Structure):
@@ -185,6 +187,10 @@ def assert_ok(code: int, action: str) -> None:
     assert code == RET_CODE_OK, f"{action} failed with ret_code={code}"
 
 
+def assert_code(code: int, expected: int, action: str) -> None:
+    assert code == expected, f"{action} returned ret_code={code}, expected {expected}"
+
+
 def make_config(dim: int) -> IndexConfig:
     return IndexConfig(
         index_type_=INDEX_TYPE_SCANN,
@@ -216,6 +222,16 @@ def add_vectors(
     assert_ok(lib.vqindex_add(handler, data, len(flat), vid_data), "add")
 
 
+def insert_vectors(
+    lib: ctypes.CDLL, handler: ctypes.c_void_p, vectors: list[list[float]], vids: list[int]
+) -> None:
+    assert len(vectors) == len(vids)
+    flat = flatten(vectors)
+    data = (ctypes.c_float * len(flat))(*flat)
+    vid_data = (ctypes.c_int64 * len(vids))(*vids)
+    assert_ok(lib.vqindex_insert(handler, data, len(flat), vid_data), "insert")
+
+
 def search_one(
     lib: ctypes.CDLL,
     handler: ctypes.c_void_p,
@@ -235,6 +251,28 @@ def search_one(
         "search",
     )
     return [result[i] for i in range(min(topk, result_count.value)) if result[i].score_ >= 0]
+
+
+def raw_search(
+    lib: ctypes.CDLL,
+    handler: ctypes.c_void_p,
+    vector: list[float],
+    result_capacity: int = 10,
+) -> tuple[int, int]:
+    query = (ctypes.c_float * len(vector))(*vector)
+    result = (ResultSearch * max(result_capacity, 1))()
+    result_count = ctypes.c_uint64(0)
+    params = ParamsSearch(topk_=10, reorder_topk_=32, nprobe_=32)
+    code = lib.vqindex_search(
+        handler,
+        query,
+        len(vector),
+        result if result_capacity > 0 else None,
+        result_capacity,
+        ctypes.byref(result_count),
+        params,
+    )
+    return code, result_count.value
 
 
 def init_index(lib: ctypes.CDLL, index_dir: Path, dim: int) -> ctypes.c_void_p:
@@ -269,10 +307,21 @@ def current_config(lib: ctypes.CDLL, handler: ctypes.c_void_p) -> str:
     return buf.value.decode("utf-8")
 
 
+def last_error(lib: ctypes.CDLL, handler: ctypes.c_void_p | None) -> str:
+    buf = ctypes.create_string_buffer(4096)
+    assert_ok(lib.vqindex_last_error(handler, buf, len(buf)), "last error")
+    return buf.value.decode("utf-8")
+
+
 def get_global_string(lib: ctypes.CDLL, func_name: str) -> str:
     buf = ctypes.create_string_buffer(4096)
     assert_ok(getattr(lib, func_name)(buf, len(buf)), func_name)
     return buf.value.decode("utf-8")
+
+
+def assert_global_buffer_too_small(lib: ctypes.CDLL, func_name: str) -> None:
+    buf = ctypes.create_string_buffer(4)
+    assert_code(getattr(lib, func_name)(buf, len(buf)), RET_CODE_MEMORYERR, func_name)
 
 
 def read_npy(path: Path) -> tuple[tuple[int, ...], str, bytes]:
@@ -299,6 +348,15 @@ def write_npy_u1(path: Path, shape: tuple[int, ...], payload: bytes | bytearray)
     header_len = len(header) + 1
     padding = (16 - ((10 + header_len) % 16)) % 16
     header_bytes = (header + (" " * padding) + "\n").encode("latin1")
+    path.write_bytes(b"\x93NUMPY\x01\x00" + struct.pack("<H", len(header_bytes)) + header_bytes + payload)
+
+
+def write_npy_u8(path: Path, shape: tuple[int, ...], values: list[int]) -> None:
+    header = f"{{'descr': '<u8', 'fortran_order': False, 'shape': {shape}, }}"
+    header_len = len(header) + 1
+    padding = (16 - ((10 + header_len) % 16)) % 16
+    header_bytes = (header + (" " * padding) + "\n").encode("latin1")
+    payload = struct.pack("<" + "Q" * len(values), *values)
     path.write_bytes(b"\x93NUMPY\x01\x00" + struct.pack("<H", len(header_bytes)) + header_bytes + payload)
 
 
@@ -387,14 +445,25 @@ def main() -> None:
     base_count = 9000
     target_vid = 424242
     added_vid = 424243
+    inserted_vid = 424244
 
     rng = random.Random(20260515)
     base_vectors = [unit_vector(rng, dim) for _ in range(base_count)]
     base_vids = [100000 + i for i in range(base_count)]
     target_vector = unit_vector(rng, dim)
     added_vector = unit_vector(rng, dim)
+    inserted_vector = unit_vector(rng, dim)
 
     lib = load_library()
+    for removed_symbol in ("vqindex_upsert", "vqindex_delete"):
+        try:
+            getattr(lib, removed_symbol)
+        except AttributeError:
+            pass
+        else:
+            raise AssertionError(f"removed symbol is still exported: {removed_symbol}")
+    assert_global_buffer_too_small(lib, "vqindex_version")
+    assert_global_buffer_too_small(lib, "vqindex_capabilities")
     assert "vqindex_api=3" in get_global_string(lib, "vqindex_version")
     capabilities = get_global_string(lib, "vqindex_capabilities")
     for capability in ("insert=1", "current_config=1"):
@@ -411,6 +480,12 @@ def main() -> None:
         stats = lib.vqindex_stats(handler)
         assert_stats(stats, dataset_size=0, index_size=0, dim=dim)
         assert stats.current_status_ == INDEX_STATE_NOINDEX, stats.current_status_
+        code, result_count = raw_search(lib, handler, target_vector)
+        assert_code(code, RET_CODE_NOREADY, "search before train")
+        assert result_count == 0, result_count
+        assert "ready index" in last_error(lib, handler)
+        assert_ok(lib.vqindex_clear_error(handler), "clear error")
+        assert last_error(lib, handler) == ""
 
         add_vectors(lib, handler, base_vectors, base_vids)
         add_vectors(lib, handler, [target_vector], [target_vid])
@@ -472,6 +547,20 @@ def main() -> None:
         assert (index_dir / "index" / "leaf_lut16_packed_dataset.npy").exists()
         assert (index_dir / "index" / "leaf_lut16_packed_meta.npy").exists()
         assert not (index_dir / "index" / "hashed_dataset.npy").exists()
+        bad_dir = Path(tempfile.mkdtemp(prefix="vqindex-bad-packed-"))
+        try:
+            shutil.copytree(index_dir, bad_dir, dirs_exist_ok=True)
+            write_npy_u8(
+                bad_dir / "index" / "leaf_lut16_packed_meta.npy",
+                (1, 4),
+                [(1 << 64) - 2, 16, 1, 1],
+            )
+            bad_handler = lib.vqindex_init(str(bad_dir).encode("utf-8"), make_config(dim))
+            assert not bad_handler, "corrupt packed metadata should fail init"
+            assert "init failed" in last_error(lib, None)
+            assert_ok(lib.vqindex_clear_error(None), "clear global error")
+        finally:
+            shutil.rmtree(bad_dir, ignore_errors=True)
         convert_packed_artifacts_to_legacy_hashed(index_dir, has_soar=True)
         assert (index_dir / "index" / "hashed_dataset.npy").exists()
         assert (index_dir / "index" / "hashed_dataset_soar.npy").exists()
@@ -492,19 +581,24 @@ def main() -> None:
         assert not (index_dir / "index" / "hashed_dataset.npy").exists()
         assert not (index_dir / "index" / "hashed_dataset_soar.npy").exists()
 
+        insert_vectors(lib, handler, [inserted_vector], [inserted_vid])
         add_vectors(lib, handler, [added_vector], [added_vid])
         stats = lib.vqindex_stats(handler)
-        assert_stats(stats, dataset_size=base_count + 2, index_size=base_count + 1, dim=dim)
+        assert_stats(stats, dataset_size=base_count + 3, index_size=base_count + 1, dim=dim)
         assert_ok(lib.vqindex_train(handler, TRAIN_TYPE_DEFAULT, 0, 8), "incremental train")
         stats = lib.vqindex_stats(handler)
-        assert_stats(stats, dataset_size=base_count + 2, index_size=base_count + 2, dim=dim)
+        assert_stats(stats, dataset_size=base_count + 3, index_size=base_count + 3, dim=dim)
 
         results = search_one(lib, handler, added_vector)
         assert results, "expected incremental search result"
         assert results[0].vid_ == added_vid, results[0].vid_
         assert results[0].score_ > 0.99, results[0].score_
+        results = search_one(lib, handler, inserted_vector)
+        assert results, "expected insert alias search result"
+        assert results[0].vid_ == inserted_vid, results[0].vid_
+        assert results[0].score_ > 0.99, results[0].score_
 
-        assert_ok(lib.vqindex_dump(handler), "dump after incremental train")
+        assert_ok(lib.vqindex_flush(handler), "flush after incremental train")
         print(f"ok: Go ScaNN C API contract passed in {index_dir}")
     finally:
         if handler:

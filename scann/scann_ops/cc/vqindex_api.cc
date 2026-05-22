@@ -908,18 +908,6 @@ public:
         }
     }
 
-    inline std::string ReadFileString(const string& filename)
-    {
-        std::ifstream in(filename);
-        if (!in) {
-            return std::string();
-        }
-        std::istreambuf_iterator<char> begin(in), end;
-        string content(begin, end);
-        in.close();
-        return content;
-    }
-
     bool AssetExists(std::string& index_dir, const std::string& filename)
     {
         std::string file_path = index_dir + "/" + filename;

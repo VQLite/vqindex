@@ -237,7 +237,9 @@ StatusOr<ScannInterface::ScannArtifacts> ScannInterface::LoadArtifacts(
       const uint64_t size = packed_lut16_meta[4 * i + 1];
       const uint64_t num_datapoints = packed_lut16_meta[4 * i + 2];
       const uint64_t num_blocks = packed_lut16_meta[4 * i + 3];
-      if (offset + size > packed_lut16_data.size()) {
+      const uint64_t packed_data_size =
+          static_cast<uint64_t>(packed_lut16_data.size());
+      if (offset > packed_data_size || size > packed_data_size - offset) {
         return FailedPreconditionError(
             "Packed LUT16 leaf metadata references bytes outside the packed "
             "dataset.");
