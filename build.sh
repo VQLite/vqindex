@@ -122,6 +122,12 @@ compile_flag_supported() {
 
 append_copt_if_supported() {
     local flag="$1"
+    local existing
+    for existing in "${ARCH_COPTS[@]}"; do
+        if [ "${existing}" = "--copt=${flag}" ]; then
+            return 0
+        fi
+    done
     if compile_flag_supported "${flag}"; then
         ARCH_COPTS+=("--copt=${flag}")
         ARCH_CXXOPTS+=("--cxxopt=${flag}")
@@ -152,6 +158,18 @@ append_cpu_flag_if_supported() {
     if has_cpu_flag "${cpu_flag}"; then
         append_copt_if_supported "${compiler_flag}"
     fi
+}
+
+append_cpu_flag_alias_if_supported() {
+    local compiler_flag="$1"
+    shift
+    local cpu_flag
+    for cpu_flag in "$@"; do
+        if has_cpu_flag "${cpu_flag}"; then
+            append_copt_if_supported "${compiler_flag}"
+            return 0
+        fi
+    done
 }
 
 ARCH_COPTS=()
@@ -185,6 +203,8 @@ if [[ "${CPU_OPT_MODE}" == "native" ]]; then
         # every extension we care about from -march=native.
         append_cpu_flag_if_supported "sse4_1" "-msse4.1"
         append_cpu_flag_if_supported "sse4_2" "-msse4.2"
+        append_cpu_flag_alias_if_supported "-msse3" "sse3" "pni"
+        append_cpu_flag_if_supported "ssse3" "-mssse3"
         append_cpu_flag_if_supported "popcnt" "-mpopcnt"
         append_cpu_flag_if_supported "avx" "-mavx"
         append_cpu_flag_if_supported "avx2" "-mavx2"
@@ -200,20 +220,39 @@ if [[ "${CPU_OPT_MODE}" == "native" ]]; then
         append_cpu_flag_if_supported "sha_ni" "-msha"
         append_cpu_flag_if_supported "avx512f" "-mavx512f"
         append_cpu_flag_if_supported "avx512cd" "-mavx512cd"
+        append_cpu_flag_if_supported "avx512er" "-mavx512er"
+        append_cpu_flag_if_supported "avx512pf" "-mavx512pf"
         append_cpu_flag_if_supported "avx512vl" "-mavx512vl"
         append_cpu_flag_if_supported "avx512bw" "-mavx512bw"
         append_cpu_flag_if_supported "avx512dq" "-mavx512dq"
         append_cpu_flag_if_supported "avx512vbmi" "-mavx512vbmi"
+        append_cpu_flag_alias_if_supported \
+            "-mavx512vbmi2" "avx512vbmi2" "avx512_vbmi2"
         append_cpu_flag_if_supported "avx512ifma" "-mavx512ifma"
+        append_cpu_flag_if_supported "avx512_bitalg" "-mavx512bitalg"
         append_cpu_flag_if_supported "avx512_vnni" "-mavx512vnni"
+        append_cpu_flag_if_supported "avx512_vpopcntdq" "-mavx512vpopcntdq"
         append_cpu_flag_if_supported "avx512_bf16" "-mavx512bf16"
         append_cpu_flag_if_supported "avx512_fp16" "-mavx512fp16"
+        append_cpu_flag_if_supported "avx512_4vnniw" "-mavx5124vnniw"
+        append_cpu_flag_if_supported "avx512_4fmaps" "-mavx5124fmaps"
+        append_cpu_flag_if_supported "avx_vnni" "-mavxvnni"
+        append_cpu_flag_if_supported "avx_vnni_int8" "-mavxvnniint8"
+        append_cpu_flag_if_supported "avx_ne_convert" "-mavxneconvert"
+        append_cpu_flag_if_supported "gfni" "-mgfni"
+        append_cpu_flag_if_supported "vaes" "-mvaes"
+        append_cpu_flag_if_supported "vpclmulqdq" "-mvpclmulqdq"
+        append_cpu_flag_if_supported "amx_tile" "-mamx-tile"
+        append_cpu_flag_if_supported "amx_int8" "-mamx-int8"
+        append_cpu_flag_if_supported "amx_bf16" "-mamx-bf16"
+        append_cpu_flag_if_supported "amx_fp16" "-mamx-fp16"
     elif [[ "${ARCH}" == "arm64" || "${ARCH}" == "aarch64" ]]; then
+        arm_flag_count="${#ARCH_COPTS[@]}"
         append_copt_if_supported "-mcpu=native"
-        if [ "${#ARCH_COPTS[@]}" -eq 0 ]; then
+        if [ "${#ARCH_COPTS[@]}" -eq "${arm_flag_count}" ]; then
             append_copt_if_supported "-march=native"
         fi
-        if [ "${#ARCH_COPTS[@]}" -eq 0 ]; then
+        if [ "${#ARCH_COPTS[@]}" -eq "${arm_flag_count}" ]; then
             append_copt_if_supported "-march=armv8-a+simd"
         fi
     else

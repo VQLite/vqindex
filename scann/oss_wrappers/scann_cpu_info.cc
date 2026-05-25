@@ -15,7 +15,10 @@
 
 #include "scann/oss_wrappers/scann_cpu_info.h"
 
+#include <cstdint>
+
 #include "absl/base/call_once.h"
+#include "absl/log/check.h"
 #if defined(PLATFORM_IS_X86)
 #include <mutex>
 #endif
@@ -52,6 +55,11 @@
 
 namespace research_scann {
 namespace port {
+
+using std::string;
+using uint32 = uint32_t;
+using uint64 = uint64_t;
+
 namespace {
 
 #ifdef PLATFORM_IS_X86
