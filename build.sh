@@ -164,6 +164,17 @@ case "${CPU_OPT_MODE}" in
         ;;
 esac
 
+case "${ARCH}" in
+    x86_64|amd64)
+        ARCH_COPTS+=("--copt=-DPLATFORM_IS_X86")
+        ARCH_CXXOPTS+=("--cxxopt=-DPLATFORM_IS_X86")
+        ;;
+    arm64|aarch64)
+        ARCH_COPTS+=("--copt=-DPLATFORM_IS_ARM64")
+        ARCH_CXXOPTS+=("--cxxopt=-DPLATFORM_IS_ARM64")
+        ;;
+esac
+
 if [[ "${CPU_OPT_MODE}" == "native" ]]; then
     if [[ "${ARCH}" == "x86_64" || "${ARCH}" == "amd64" ]]; then
         append_copt_if_supported "-march=native"
