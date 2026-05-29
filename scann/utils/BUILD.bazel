@@ -1,7 +1,7 @@
 # Description:
 #   This is for the utility functions to be used across ScaNN.
 
-load("@rules_cc//cc:defs.bzl", "cc_binary")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_test")
 
 package(
     default_visibility = ["//visibility:public"],
@@ -386,9 +386,17 @@ cc_library(
         ":types",
         "//scann/data_format:dataset",
         "//scann/oss_wrappers:scann_status",
-        "@cnpy",
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/strings:string_view",
+    ],
+)
+
+cc_test(
+    name = "io_npy_test",
+    srcs = ["io_npy_test.cc"],
+    deps = [
+        ":io_npy",
+        "@com_google_googletest//:gtest_main",
     ],
 )
 

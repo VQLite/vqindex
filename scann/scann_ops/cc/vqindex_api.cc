@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <unistd.h>
 
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -1252,10 +1253,18 @@ bool VQLiteIndexScann::InitImpl(std::string& index_dir)
     string scann_assets_pbtxt = GetAssetsInfo(index_dir);
 
     ScannConfig config;
-    ReadProtobufFromFile(string(index_dir) + "/scann_config.pb", &config);
+    Status config_status =
+        ReadProtobufFromFile(string(index_dir) + "/scann_config.pb", &config);
+    if (!config_status.ok()) {
+        SetError(std::string(config_status.message()));
+        LOG(INFO) << config_status.message();
+        delete scann_handler;
+        return false;
+    }
 
     Status ret = scann_handler->Initialize(config.DebugString(), scann_assets_pbtxt);
     if (!ret.ok()) {
+        SetError(std::string(ret.message()));
         delete scann_handler;
         LOG(INFO) << ret.message();
         return false;
@@ -1476,23 +1485,33 @@ using namespace vqindex;
 
 void* vqindex_init(const char* index_dir, index_config_t config_i)
 {
-    if (config_i.index_type_ != INDEX_TYPE_SCANN || config_i.dim_ <= 0) {
-        LOG(INFO) << "Only Support ScaNN.";
-        return NULL;
-    }
-    VQLiteIndexScann* vql_index = new VQLiteIndexScann(index_dir, config_i);
-    if (vql_index == NULL) {
-        LOG(INFO) << "New Molloc Index Fail.";
-        return NULL;
-    }
+    try {
+        if (config_i.index_type_ != INDEX_TYPE_SCANN || config_i.dim_ <= 0) {
+            LOG(INFO) << "Only Support ScaNN.";
+            g_last_error = "Only Support ScaNN.";
+            return NULL;
+        }
+        std::unique_ptr<VQLiteIndexScann> vql_index(
+            new VQLiteIndexScann(index_dir, config_i));
 
-    if (!vql_index->Init()) {
-        LOG(INFO) << "Init Fail.";
-        delete vql_index;
+        if (!vql_index->Init()) {
+            LOG(INFO) << "Init Fail.";
+            if (vql_index->LastError().empty()) {
+                vql_index->SetError("Init Fail.");
+            }
+            return NULL;
+        }
+
+        return vql_index.release();
+    } catch (const std::exception& e) {
+        g_last_error = std::string("vqindex_init exception: ") + e.what();
+        LOG(INFO) << g_last_error;
+        return NULL;
+    } catch (...) {
+        g_last_error = "vqindex_init unknown exception";
+        LOG(INFO) << g_last_error;
         return NULL;
     }
-
-    return vql_index;
 }
 
 void vqindex_release(void* vql_handler)
