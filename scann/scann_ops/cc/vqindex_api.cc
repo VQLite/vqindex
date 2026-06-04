@@ -7,9 +7,13 @@
 
 #include "scann/scann_ops/cc/vqindex_api.h"
 
+#include <fcntl.h>
 #include <stdio.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -45,6 +49,206 @@ using namespace std;
 namespace vqindex {
 
 thread_local std::string g_last_error;
+
+std::string UniqueSiblingPath(const std::string& path, const std::string& tag)
+{
+    auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    return path + "." + tag + "." + std::to_string(getpid()) + "." + std::to_string(now);
+}
+
+bool FsyncPath(const std::string& path)
+{
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        return false;
+    }
+    bool ok = fsync(fd) == 0;
+    close(fd);
+    return ok;
+}
+
+bool FsyncDirectory(const std::filesystem::path& path)
+{
+#ifdef O_DIRECTORY
+    int fd = open(path.c_str(), O_RDONLY | O_DIRECTORY);
+#else
+    int fd = open(path.c_str(), O_RDONLY);
+#endif
+    if (fd < 0) {
+        return false;
+    }
+    bool ok = fsync(fd) == 0;
+    close(fd);
+    return ok;
+}
+
+void FsyncDirectoryTree(const std::filesystem::path& path)
+{
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) {
+        return;
+    }
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(path, ec)) {
+        if (ec) {
+            break;
+        }
+        if (entry.is_regular_file(ec)) {
+            FsyncPath(entry.path().string());
+        } else if (entry.is_directory(ec)) {
+            FsyncDirectory(entry.path());
+        }
+        ec.clear();
+    }
+    FsyncDirectory(path);
+}
+
+bool WriteBytesAtomically(const std::string& path, const void* data, size_t bytes,
+    std::string* error)
+{
+    std::error_code ec;
+    std::filesystem::path file_path(path);
+    std::filesystem::path parent = file_path.parent_path();
+    if (!parent.empty() && !std::filesystem::exists(parent) &&
+        !std::filesystem::create_directories(parent, ec)) {
+        if (error != NULL) {
+            *error = "create parent directory failed: " + parent.string();
+        }
+        return false;
+    }
+
+    std::string tmp_path = UniqueSiblingPath(path, "tmp");
+    {
+        std::ofstream out(tmp_path, ios::out | ios::binary | ios::trunc);
+        if (!out) {
+            if (error != NULL) {
+                *error = "open temp file failed: " + tmp_path;
+            }
+            return false;
+        }
+        if (bytes > 0) {
+            out.write(reinterpret_cast<const char*>(data), bytes);
+        }
+        out.flush();
+        if (!out.good()) {
+            if (error != NULL) {
+                *error = "write temp file failed: " + tmp_path;
+            }
+            out.close();
+            std::filesystem::remove(tmp_path, ec);
+            return false;
+        }
+    }
+
+    if (!FsyncPath(tmp_path)) {
+        if (error != NULL) {
+            *error = "fsync temp file failed: " + tmp_path;
+        }
+        std::filesystem::remove(tmp_path, ec);
+        return false;
+    }
+    std::filesystem::rename(tmp_path, path, ec);
+    if (ec) {
+        if (error != NULL) {
+            *error = "rename temp file failed: " + ec.message();
+        }
+        std::filesystem::remove(tmp_path, ec);
+        return false;
+    }
+    if (!parent.empty()) {
+        FsyncDirectory(parent);
+    }
+    return true;
+}
+
+bool ReplaceDirectoryAtomically(const std::string& dst_dir, const std::string& src_dir,
+    std::string* error)
+{
+    std::error_code ec;
+    std::filesystem::path dst_path(dst_dir);
+    std::filesystem::path parent = dst_path.parent_path();
+    if (!parent.empty() && !std::filesystem::exists(parent) &&
+        !std::filesystem::create_directories(parent, ec)) {
+        if (error != NULL) {
+            *error = "create parent directory failed: " + parent.string();
+        }
+        return false;
+    }
+
+    std::string backup_dir = UniqueSiblingPath(dst_dir, "backup");
+    bool has_backup = false;
+    if (std::filesystem::exists(dst_dir)) {
+        std::filesystem::rename(dst_dir, backup_dir, ec);
+        if (ec) {
+            if (error != NULL) {
+                *error = "rename index to backup failed: " + ec.message();
+            }
+            return false;
+        }
+        has_backup = true;
+    }
+
+    ec.clear();
+    std::filesystem::rename(src_dir, dst_dir, ec);
+    if (ec) {
+        if (has_backup) {
+            std::error_code restore_ec;
+            std::filesystem::rename(backup_dir, dst_dir, restore_ec);
+        }
+        if (error != NULL) {
+            *error = "rename temp index failed: " + ec.message();
+        }
+        return false;
+    }
+
+    if (!parent.empty()) {
+        FsyncDirectory(parent);
+    }
+    if (has_backup) {
+        ec.clear();
+        std::filesystem::remove_all(backup_dir, ec);
+        if (!parent.empty()) {
+            FsyncDirectory(parent);
+        }
+    }
+    return true;
+}
+
+std::vector<std::string> FindSiblingDirectoriesWithPrefix(
+    const std::string& path, const std::string& tag)
+{
+    std::vector<std::string> ret;
+    std::filesystem::path base(path);
+    std::filesystem::path parent = base.parent_path();
+    if (parent.empty()) {
+        parent = ".";
+    }
+    std::string prefix = base.filename().string() + "." + tag + ".";
+    std::error_code ec;
+    if (!std::filesystem::exists(parent, ec)) {
+        return ret;
+    }
+    for (const auto& entry : std::filesystem::directory_iterator(parent, ec)) {
+        if (ec) {
+            break;
+        }
+        std::string name = entry.path().filename().string();
+        if (entry.is_directory(ec) && name.rfind(prefix, 0) == 0) {
+            ret.push_back(entry.path().string());
+        }
+        ec.clear();
+    }
+    std::sort(ret.begin(), ret.end(), std::greater<std::string>());
+    return ret;
+}
+
+void RemoveSiblingDirectoriesWithPrefix(const std::string& path, const std::string& tag)
+{
+    std::error_code ec;
+    for (const auto& dir : FindSiblingDirectoriesWithPrefix(path, tag)) {
+        std::filesystem::remove_all(dir, ec);
+        ec.clear();
+    }
+}
 
 int64_t MillisecondsSince(std::chrono::steady_clock::time_point start)
 {
@@ -714,6 +918,7 @@ ret_code_t VQLiteIndex::DoDump()
     auto start = std::chrono::steady_clock::now();
     std::error_code ec;
     std::string index_dir = index_root_dir_ + "/" + index_subdir_name_;
+    std::string tmp_index_dir;
     ret_code_t ret = RET_CODE_OK;
 
     if (current_state_ > INDEX_STATE_READY) {
@@ -724,51 +929,64 @@ ret_code_t VQLiteIndex::DoDump()
 
     current_state_ = INDEX_STATE_DUMP;
 
-    if (!IsExists(index_dir) && !std::filesystem::create_directories(index_dir, ec)) {
-        LOG(INFO) << "Create Directories Fail.";
-        ret = RET_CODE_NOPERMISSION;
-        goto end;
-    }
-    if (DumpImpl(index_dir) != 0) {
-        LOG(INFO) << "Dump Index Fail.";
-        SetError("dump index failed");
-        ret = RET_CODE_INDEXERR;
-        goto end;
-    }
-    {
-        std::string vids_file_path = index_root_dir_ + "/" + vids_filename_;
-        std::ofstream outs_vids(vids_file_path, ios::out | ios::binary);
-        if (!outs_vids) {
+    if (GetIndexPointsNum() > 0) {
+        tmp_index_dir = UniqueSiblingPath(index_dir, "tmp");
+        std::filesystem::remove_all(tmp_index_dir, ec);
+        ec.clear();
+        if (!std::filesystem::create_directories(tmp_index_dir, ec)) {
+            LOG(INFO) << "Create temp index directory fail: " << tmp_index_dir;
+            SetError("create temp index directory failed");
             ret = RET_CODE_NOPERMISSION;
             goto end;
         }
-        outs_vids.write((char*)vids_.data(), vids_.size() * sizeof(int64_t));
-        outs_vids.close();
-        if (outs_vids.bad()) {
-            LOG(INFO) << "Dump vids Fail.";
-            ret = RET_CODE_NOPERMISSION;
+        if (DumpImpl(tmp_index_dir) != 0) {
+            LOG(INFO) << "Dump Index Fail.";
+            SetError("dump index failed");
+            ret = RET_CODE_INDEXERR;
             goto end;
         }
+        FsyncDirectoryTree(tmp_index_dir);
     }
+
     if (storage_type_ == STORAGE_MEMORY || datasets_dirty_) {
         std::string datasets_file_path = index_root_dir_ + "/" + datasets_filename_;
-        std::ofstream outs_datasets(datasets_file_path, ios::out | ios::binary);
-        if (!outs_datasets) {
-            ret = RET_CODE_NOPERMISSION;
-            goto end;
-        }
-        outs_datasets.write((char*)datasets_.data(), datasets_.size() * sizeof(float));
-        outs_datasets.close();
-        if (outs_datasets.bad()) {
-            LOG(INFO) << "Dump Datasets Fail.";
+        std::string error;
+        if (!WriteBytesAtomically(datasets_file_path, datasets_.data(),
+                datasets_.size() * sizeof(float), &error)) {
+            LOG(INFO) << "Dump Datasets Fail: " << error;
+            SetError(error);
             ret = RET_CODE_NOPERMISSION;
             goto end;
         }
         datasets_npoints_ = datasets_.size() / dim_;
         datasets_dirty_ = false;
     }
+    {
+        std::string vids_file_path = index_root_dir_ + "/" + vids_filename_;
+        std::string error;
+        if (!WriteBytesAtomically(vids_file_path, vids_.data(),
+                vids_.size() * sizeof(int64_t), &error)) {
+            LOG(INFO) << "Dump vids Fail: " << error;
+            SetError(error);
+            ret = RET_CODE_NOPERMISSION;
+            goto end;
+        }
+    }
+    if (!tmp_index_dir.empty()) {
+        std::string error;
+        if (!ReplaceDirectoryAtomically(index_dir, tmp_index_dir, &error)) {
+            LOG(INFO) << "Replace index directory fail: " << error;
+            SetError(error);
+            ret = RET_CODE_NOPERMISSION;
+            goto end;
+        }
+        tmp_index_dir.clear();
+    }
 
 end:
+    if (!tmp_index_dir.empty()) {
+        std::filesystem::remove_all(tmp_index_dir, ec);
+    }
     if (GetIndexPointsNum() > 0) {
         current_state_ = INDEX_STATE_READY;
     } else {
@@ -1010,6 +1228,56 @@ public:
         return ret;
     }
 
+    void RecoverInterruptedDump(std::string& index_dir)
+    {
+        std::error_code ec;
+        if (std::filesystem::exists(index_dir)) {
+            return;
+        }
+
+        auto tmp_dirs = FindSiblingDirectoriesWithPrefix(index_dir, "tmp");
+        for (const auto& tmp_dir : tmp_dirs) {
+            std::string candidate_dir = tmp_dir;
+            if (!CheckIndexFiles(candidate_dir)) {
+                continue;
+            }
+            ec.clear();
+            std::filesystem::rename(tmp_dir, index_dir, ec);
+            if (!ec) {
+                std::filesystem::path parent = std::filesystem::path(index_dir).parent_path();
+                FsyncDirectory(parent.empty() ? std::filesystem::path(".") : parent);
+                LOG(INFO) << "Recovered complete temp index directory: " << tmp_dir;
+                return;
+            }
+            LOG(INFO) << "Recover temp index directory failed: " << ec.message();
+        }
+
+        auto backup_dirs = FindSiblingDirectoriesWithPrefix(index_dir, "backup");
+        for (const auto& backup_dir : backup_dirs) {
+            std::string candidate_dir = backup_dir;
+            if (!CheckIndexFiles(candidate_dir)) {
+                continue;
+            }
+            ec.clear();
+            std::filesystem::rename(backup_dir, index_dir, ec);
+            if (!ec) {
+                std::filesystem::path parent = std::filesystem::path(index_dir).parent_path();
+                FsyncDirectory(parent.empty() ? std::filesystem::path(".") : parent);
+                LOG(INFO) << "Recovered backup index directory: " << backup_dir;
+                return;
+            }
+            LOG(INFO) << "Recover backup index directory failed: " << ec.message();
+        }
+    }
+
+    void CleanupInterruptedDumpDirs(std::string& index_dir)
+    {
+        RemoveSiblingDirectoriesWithPrefix(index_dir, "tmp");
+        RemoveSiblingDirectoriesWithPrefix(index_dir, "backup");
+        std::filesystem::path parent = std::filesystem::path(index_dir).parent_path();
+        FsyncDirectory(parent.empty() ? std::filesystem::path(".") : parent);
+    }
+
     std::string GetManualScannConfig(uint64_t datasets_train_size, uint32_t nlist)
     {
         LOG(INFO) << datasets_train_size << ": " << brute_threshold_;
@@ -1241,6 +1509,7 @@ private:
 
 bool VQLiteIndexScann::InitImpl(std::string& index_dir)
 {
+    RecoverInterruptedDump(index_dir);
     if (!CheckIndexFiles(index_dir)) {
         return true;
     }
@@ -1271,6 +1540,7 @@ bool VQLiteIndexScann::InitImpl(std::string& index_dir)
     }
 
     this->scann_handler_ = scann_handler;
+    CleanupInterruptedDumpDirs(index_dir);
     LOG(INFO) << "index npoints=" << GetIndexPointsNum();
 
     return true;
@@ -1362,7 +1632,7 @@ int VQLiteIndexScann::DumpImpl(std::string& index_dir)
     if (scann_handler_ == NULL) {
         return 0;
     }
-    StatusOr<ScannAssets> assets_or = scann_handler_->Serialize(index_dir);
+    StatusOr<ScannAssets> assets_or = scann_handler_->Serialize(index_dir, true);
     if (!assets_or.ok()) {
         LOG(INFO) << assets_or.status().message();
         return -1;
@@ -1389,6 +1659,10 @@ int VQLiteIndexScann::DumpImpl(std::string& index_dir)
         artifact_format_ = ARTIFACT_FORMAT_BRUTE;
     } else {
         artifact_format_ = ARTIFACT_FORMAT_LEGACY_HASHED;
+    }
+    if (!CheckIndexFiles(index_dir)) {
+        LOG(INFO) << "Dumped index files are incomplete.";
+        return -1;
     }
     return 0;
 }

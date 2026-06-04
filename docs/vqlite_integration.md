@@ -197,6 +197,39 @@ Flush/dump always writes the new packed format when the trained searcher can
 export packed leaf data. After dumping a legacy loaded Tree-AH index, the old
 hashed artifacts are removed in favor of the packed artifacts.
 
+## Dump And Recovery
+
+`vqindex_dump` and `vqindex_flush` use a staged write path:
+
+1. ScaNN artifacts are serialized into a sibling temporary directory named
+   `index.tmp.<pid>.<timestamp>`.
+2. `datasets.vql` is atomically replaced when the in-memory dataset cache is
+   dirty or memory-backed storage is used.
+3. `vids.vql` is atomically replaced after the dataset file.
+4. The temporary index directory is validated, fsynced, and then promoted to
+   `<index_dir>/index/` through a backup directory named
+   `index.backup.<pid>.<timestamp>`.
+
+`vids.vql` remains required because ScaNN returns internal row ids and VQIndex
+maps them back to caller-visible vids through this file. `datasets.vql` may be
+deleted for immutable fully-trained segments when there are no pending vectors,
+but full retrain/rebalance from raw vectors will no longer be possible until new
+vectors are added and the file is recreated.
+
+If a process is interrupted during dump, the next `vqindex_init` handles the
+common recovery cases:
+
+- If a valid `index/` still exists, stale `index.tmp.*` or `index.backup.*`
+  directories are ignored and cleaned after a successful load.
+- If `index/` is missing and a complete `index.tmp.*` exists, it is promoted to
+  `index/`.
+- If `index/` is missing and only a complete `index.backup.*` exists, the
+  backup is restored.
+
+The dump path is crash-tolerant for the wrapper's normal local filesystem use,
+but it is not a multi-version transaction manager. Do not run concurrent dumps
+or mutate the same index directory from multiple processes.
+
 ## Tuning API
 
 Use `vqindex_set_tuning` before training to control wrapper-generated configs:
@@ -277,6 +310,7 @@ This covers:
 - health stats
 - packed LUT16 dump/load
 - legacy hashed load fallback
+- atomic dump temp/backup recovery
 - corrupted packed metadata rejection
 
 Run the upstream ScaNN notebook-style benchmark:

@@ -71,7 +71,8 @@ python3 test/test_go_scann_api.py
 ```
 This test mirrors the Go wrapper in VQLite: file-backed storage, default
 training, search, dump/reload, packed artifact handling, legacy hashed artifact
-loading, tuning, SOAR, health stats, and incremental add/train/search.
+loading, atomic dump recovery, tuning, SOAR, health stats, and incremental
+add/train/search.
 
 ## Standard ScaNN example benchmark
 Use the upstream ScaNN `docs/example.ipynb` GloVe-100 angular flow as the

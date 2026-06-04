@@ -28,6 +28,9 @@ Important wrapper changes:
   `leaf_lut16_packed_dataset.npy` and `leaf_lut16_packed_meta.npy`.
 - Legacy `hashed_dataset.npy` indexes still load when packed artifacts are not
   present, but future dumps rewrite to packed artifacts.
+- `vqindex_dump` / `vqindex_flush` now use staged writes with atomic file
+  replacement, temporary index directories, backup directories, and init-time
+  recovery for interrupted dumps.
 - Live delete/upsert mutation APIs are intentionally not exposed. The VQLite
   layer should continue using tombstones above ScaNN.
 

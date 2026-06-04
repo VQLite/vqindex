@@ -581,6 +581,38 @@ def main() -> None:
         assert not (index_dir / "index" / "hashed_dataset.npy").exists()
         assert not (index_dir / "index" / "hashed_dataset_soar.npy").exists()
 
+        stale_tmp_dir = index_dir / "index.tmp.stale"
+        stale_tmp_dir.mkdir()
+        (stale_tmp_dir / "scann_config.pb").write_bytes(b"not a complete index")
+        lib.vqindex_release(handler)
+        handler = None
+        handler = init_index(lib, index_dir, dim)
+        assert not stale_tmp_dir.exists()
+        results = search_one(lib, handler, target_vector)
+        assert results[0].vid_ == target_vid, results[0].vid_
+
+        tmp_recovery_dir = index_dir / "index.tmp.recovery"
+        shutil.copytree(index_dir / "index", tmp_recovery_dir)
+        shutil.rmtree(index_dir / "index")
+        lib.vqindex_release(handler)
+        handler = None
+        handler = init_index(lib, index_dir, dim)
+        assert (index_dir / "index").exists()
+        assert not tmp_recovery_dir.exists()
+        results = search_one(lib, handler, target_vector)
+        assert results[0].vid_ == target_vid, results[0].vid_
+
+        backup_recovery_dir = index_dir / "index.backup.recovery"
+        shutil.copytree(index_dir / "index", backup_recovery_dir)
+        shutil.rmtree(index_dir / "index")
+        lib.vqindex_release(handler)
+        handler = None
+        handler = init_index(lib, index_dir, dim)
+        assert (index_dir / "index").exists()
+        assert not backup_recovery_dir.exists()
+        results = search_one(lib, handler, target_vector)
+        assert results[0].vid_ == target_vid, results[0].vid_
+
         insert_vectors(lib, handler, [inserted_vector], [inserted_vid])
         add_vectors(lib, handler, [added_vector], [added_vid])
         stats = lib.vqindex_stats(handler)
