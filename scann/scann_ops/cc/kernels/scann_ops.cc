@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -53,7 +53,9 @@ class ScannResource : public ResourceBase {
   explicit ScannResource()
       : scann_(std::make_unique<research_scann::ScannInterface>()) {}
 
-  string DebugString() const override { return "I am the one who knocks."; }
+  std::string DebugString() const override {
+    return "I am the one who knocks.";
+  }
 
   bool is_initialized() const { return initialized_; }
 
@@ -75,7 +77,7 @@ void CreateSearcherFromConfig(OpKernelContext* context,
   GetTensorRequireOk(context, "training_threads", &threads_tensor);
 
   OP_REQUIRES(context, db_tensor->dims() == 2,
-              errors::InvalidArgument("Dataset must be two-dimensional"));
+              absl::InvalidArgumentError("Dataset must be two-dimensional"));
 
   std::string config = config_tensor->scalar<tstring>()();
   auto db_span = TensorToConstSpan<float>(db_tensor);
@@ -100,7 +102,7 @@ class ScannCreateSearcherOp : public ResourceOpKernel<ScannResource> {
   }
 
  private:
-  Status CreateResource(ScannResource** ret)
+  absl::Status CreateResource(ScannResource** ret)
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) override {
     *ret = new ScannResource();
     return OkStatus();
@@ -128,8 +130,8 @@ class ScannSearchOp : public OpKernel {
     GetTensorRequireOk(context, "leaves_to_search", &leaves_tensor);
 
     OP_REQUIRES(context, query_tensor->dims() == 1,
-                errors::InvalidArgument("Query must be one-dimensional. Use "
-                                        "ScannSearchBatched for batching"));
+                absl::InvalidArgumentError("Query must be one-dimensional. Use "
+                                           "ScannSearchBatched for batching"));
 
     int leaves = leaves_tensor->scalar<int>()();
     int final_nn = final_nn_tensor->scalar<int>()();
@@ -179,7 +181,7 @@ class ScannSearchBatchedOp : public OpKernel {
     GetTensorRequireOk(context, "parallel", &parallel_tensor);
 
     OP_REQUIRES(context, query_tensor->dims() == 2,
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(
                     "Expected 2-dimensional input for query batch."));
 
     int leaves = leaves_tensor->scalar<int>()();
@@ -234,7 +236,7 @@ class ScannToTensorsOp : public OpKernel {
 
     auto options_or_status = scann_resource->scann_->ExtractOptions();
     OP_REQUIRES_OK(context, ConvertStatus(options_or_status.status()));
-    auto opts = options_or_status.ValueOrDie();
+    const auto& opts = options_or_status.value();
 
     TensorFromProtoRequireOk(context, "scann_config",
                              scann_resource->scann_->config());
@@ -305,18 +307,20 @@ void CreateSearcherFromSerialized(OpKernelContext* context,
   GetTensorRequireOk(context, "int8_multipliers", &int8_multipliers);
   GetTensorRequireOk(context, "dp_norms", &dp_norms);
 
-  uint32_t n_points = research_scann::kInvalidDatapointIndex;
+  research_scann::DatapointIndex n_points =
+      research_scann::kInvalidDatapointIndex;
   research_scann::ConstSpan<float> dataset;
   if (db_tensor->dims() != 0) {
     OP_REQUIRES(context, db_tensor->dims() == 2,
-                errors::InvalidArgument("Dataset must be two-dimensional"));
+                absl::InvalidArgumentError("Dataset must be two-dimensional"));
     n_points = db_tensor->dim_size(0);
     dataset = scann_ops::TensorToConstSpan<float>(db_tensor);
   }
 
   const tstring& config_tstr = config_tensor->scalar<tstring>()();
   research_scann::ScannConfig config;
-  config.ParseFromArray(config_tstr.data(), config_tstr.size());
+  config.ParseFromString(
+      absl::string_view(config_tstr.data(), config_tstr.size()));
 
   research_scann::SingleMachineFactoryOptions opts;
   if (serialized_partitioner->dims() != 0) {
@@ -324,14 +328,15 @@ void CreateSearcherFromSerialized(OpKernelContext* context,
         std::make_shared<research_scann::SerializedPartitioner>();
     const tstring& partitioner_tstr =
         serialized_partitioner->scalar<tstring>()();
-    opts.serialized_partitioner->ParseFromArray(partitioner_tstr.data(),
-                                                partitioner_tstr.size());
+    opts.serialized_partitioner->ParseFromString(
+        absl::string_view(partitioner_tstr.data(), partitioner_tstr.size()));
   }
   if (ah_codebook->dims() != 0) {
     opts.ah_codebook =
         std::make_shared<research_scann::CentersForAllSubspaces>();
     const tstring& codebook_str = ah_codebook->scalar<tstring>()();
-    opts.ah_codebook->ParseFromArray(codebook_str.data(), codebook_str.size());
+    opts.ah_codebook->ParseFromString(
+        absl::string_view(codebook_str.data(), codebook_str.size()));
   }
   research_scann::ConstSpan<int32_t> tokenization;
   research_scann::ConstSpan<uint8_t> hashed_span;
@@ -377,7 +382,7 @@ class TensorsToScannOp : public ResourceOpKernel<ScannResource> {
   }
 
  private:
-  Status CreateResource(ScannResource** ret)
+  absl::Status CreateResource(ScannResource** ret)
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) override {
     *ret = new ScannResource();
     return OkStatus();

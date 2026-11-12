@@ -6,9 +6,9 @@
 
 #ifdef __x86_64__
 
+#include "absl/base/prefetch.h"
 #include "scann/utils/bits.h"
 #include "scann/utils/intrinsics/sse4.h"
-#include "tensorflow/core/platform/prefetch.h"
 
 namespace research_scann {
 namespace asymmetric_hashing_internal {
@@ -33,8 +33,7 @@ SCANN_SSE4_INLINE Sse4<int16_t, kNumQueries, 4> Sse4LUT16BottomLoop(
   const Sse4<int16_t> total_bias = num_blocks * 128;
   for (; num_blocks != 0; --num_blocks, data_start += 16) {
     if (kPrefetch != PrefetchStrategy::kOff) {
-      ::tensorflow::port::prefetch<::tensorflow::port::PREFETCH_HINT_NTA>(
-          data_start + kPrefetchBytesAhead);
+      absl::PrefetchToLocalCacheNta(data_start + kPrefetchBytesAhead);
     }
 
     auto mask = Sse4<uint8_t>::Load(data_start);
@@ -226,6 +225,16 @@ SCANN_SSE4_INLINE void GetTopInt16DistancesImpl(
   auto restrict_whitelist_ptrs =
       args.template GetRestrictWhitelistPtrs<kNumQueries>();
   for (DatapointIndex k : Seq(num_32dp_simd_iters)) {
+    bool can_skip_batch = true;
+    for (size_t j : Seq(kNumQueries)) {
+      if (restrict_whitelist_ptrs[j] == nullptr ||
+          restrict_whitelist_ptrs[j][k] != 0) {
+        can_skip_batch = false;
+        break;
+      }
+    }
+    if (can_skip_batch) continue;
+
     const uint8_t* data_start = packed_dataset + k * 16 * num_blocks;
     auto int16_accums = Sse4LUT16MiddleLoop<kNumQueries, kPrefetch>(
         data_start, lookups, num_blocks);
@@ -282,9 +291,16 @@ SCANN_SSE4_INLINE int16_t GetInt16Threshold(float float_threshold) {
 }
 
 namespace {
-template <size_t kNumQueries, PrefetchStrategy kPrefetch, typename TopN>
+template <size_t kNumQueries, PrefetchStrategy kPrefetch,
+          bool kWithSpilling = false, typename TopN>
 SCANN_SSE4_INLINE void GetTopFloatDistancesImpl(
     LUT16ArgsTopN<float, TopN> args) {
+  if constexpr (kWithSpilling) {
+    if (args.datapoint_translation_predicate)
+      LOG(FATAL)
+          << "Spilling is incompatible with datapoint translation predicates.";
+  }
+
   const uint8_t* packed_dataset = args.packed_dataset;
   const size_t num_32dp_simd_iters = args.num_32dp_simd_iters;
   const size_t num_blocks = args.num_blocks;
@@ -322,6 +338,16 @@ SCANN_SSE4_INLINE void GetTopFloatDistancesImpl(
   auto restrict_whitelist_ptrs =
       args.template GetRestrictWhitelistPtrs<kNumQueries>();
   for (DatapointIndex k : Seq(num_32dp_simd_iters)) {
+    bool can_skip_batch = true;
+    for (size_t j : Seq(kNumQueries)) {
+      if (restrict_whitelist_ptrs[j] == nullptr ||
+          restrict_whitelist_ptrs[j][k] != 0) {
+        can_skip_batch = false;
+        break;
+      }
+    }
+    if (can_skip_batch) continue;
+
     const uint8_t* data_start = packed_dataset + k * 16 * num_blocks;
     auto int16_accums = Sse4LUT16MiddleLoop<kNumQueries, kPrefetch>(
         data_start, lookups, num_blocks);
@@ -353,7 +379,10 @@ SCANN_SSE4_INLINE void GetTopFloatDistancesImpl(
       while (push_mask) {
         const int offset = bits::FindLSBSetNonZero(push_mask);
         push_mask &= (push_mask - 1);
-        DatapointIndex dp_idx = first_dp_index + 32 * k + offset;
+        DatapointIndex dp_idx;
+        if constexpr (!kWithSpilling) {
+          dp_idx = first_dp_index + 32 * k + offset;
+        }
         DCHECK(
             !restrict_whitelist_ptrs[j] ||
             args.restrict_whitelists[j].IsWhitelisted(dp_idx - first_dp_index))
@@ -362,8 +391,10 @@ SCANN_SSE4_INLINE void GetTopFloatDistancesImpl(
           dp_idx = args.datapoint_translation_predicate(dp_idx);
         }
 
-        const bool needs_gc =
-            topn_mutators[j].Push(dp_idx, distances_buffer[offset]);
+        DCHECK_LE(distances_buffer[offset],
+                  topn_mutators[j].epsilon() + (*inv_mults[j])[0]);
+        const bool needs_gc = topn_mutators[j].PushNoEpsilonCheck(
+            dp_idx, distances_buffer[offset]);
         if (ABSL_PREDICT_FALSE(needs_gc)) {
           topn_mutators[j].GarbageCollect();
 

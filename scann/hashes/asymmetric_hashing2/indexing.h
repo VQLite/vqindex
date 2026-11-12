@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "scann/data_format/datapoint.h"
+#include "scann/data_format/dataset.h"
 #include "scann/distance_measures/distance_measure_base.h"
 #include "scann/hashes/asymmetric_hashing2/training_model.h"
 #include "scann/projection/chunking_projection.h"
@@ -100,13 +101,18 @@ class Indexer {
       ConstSpan<FloatT> original, ConstSpan<uint8_t> hashed,
       shared_ptr<const DistanceMeasure> distance_override = nullptr) const;
 
-  DimensionIndex hash_space_dimension() const;
+  DimensionIndex hashed_space_bytes() const;
+
+  ABSL_DEPRECATED("Use hashed_space_bytes() instead.")
+  DimensionIndex hash_space_dimension() const { return hashed_space_bytes(); }
 
   DimensionIndex original_space_dimension() const;
 
   Status ComputeResidual(const DatapointPtr<T>& original,
                          const DatapointPtr<uint8_t>& hashed,
                          Datapoint<FloatT>* result) const;
+
+  shared_ptr<const Model<T>> model() { return model_; }
 
  private:
   shared_ptr<const ChunkingProjection<T>> projector_;

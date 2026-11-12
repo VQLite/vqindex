@@ -1,0 +1,22 @@
+# Description:
+#   Internal helpers for projections.
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+package(
+    default_visibility = ["//visibility:public"],
+    licenses = ["notice"],
+)
+
+cc_library(
+    name = "random_orthogonal_matrix_creator",
+    srcs = ["random_orthogonal_matrix_creator.cc"],
+    hdrs = ["random_orthogonal_matrix_creator.h"],
+    deps = [
+        "//scann/data_format:dataset",
+        "//scann/oss_wrappers:scann_random",
+        "@com_google_absl//absl/random",
+        "@eigen",
+    ],
+)

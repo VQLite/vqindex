@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@
 #ifndef SCANN_PARTITIONING_PARTITIONER_FACTORY_BASE_H_
 #define SCANN_PARTITIONING_PARTITIONER_FACTORY_BASE_H_
 
+#include <utility>
+
 #include "scann/data_format/dataset.h"
 #include "scann/partitioning/kmeans_tree_partitioner_utils.h"
 #include "scann/partitioning/partitioner_base.h"
@@ -31,40 +33,91 @@ namespace research_scann {
 
 template <typename T>
 StatusOr<unique_ptr<Partitioner<T>>> PartitionerFactory(
-    const TypedDataset<T>* dataset, const PartitioningConfig& config,
+    const TypedDatasetView<T>* dataset, const PartitioningConfig& config,
     shared_ptr<ThreadPool> pool = nullptr);
 
 template <typename T>
 StatusOr<unique_ptr<Partitioner<T>>> PartitionerFactoryPreSampledAndProjected(
-    const TypedDataset<T>* dataset, const PartitioningConfig& config,
+    const TypedDatasetView<T>* dataset, const PartitioningConfig& config,
     shared_ptr<ThreadPool> training_parallelization_pool = nullptr);
 
-template <typename T, typename ProjectionType = double>
+template <typename T>
 unique_ptr<Partitioner<T>> MakeProjectingDecorator(
     shared_ptr<const Projection<T>> projection,
-    unique_ptr<Partitioner<ProjectionType>> partitioner) {
+    unique_ptr<Partitioner<float>> partitioner) {
   Partitioner<T>* result;
-  if (dynamic_cast<KMeansTreeLikePartitioner<ProjectionType>*>(
-          partitioner.get())) {
-    result = new KMeansTreeProjectingDecorator<T, ProjectionType>(
+  if (dynamic_cast<KMeansTreeLikePartitioner<float>*>(partitioner.get())) {
+    result = new KMeansTreeProjectingDecorator<T>(
         std::move(projection),
-        absl::WrapUnique(down_cast<KMeansTreeLikePartitioner<ProjectionType>*>(
+        absl::WrapUnique(down_cast<KMeansTreeLikePartitioner<float>*>(
             partitioner.release())));
   } else {
-    result = new GenericProjectingDecorator<T, ProjectionType>(
-        std::move(projection), std::move(partitioner));
+    result = new GenericProjectingDecorator<T>(std::move(projection),
+                                               std::move(partitioner));
   }
   return absl::WrapUnique(result);
 }
 
-#define SCANN_INSTANTIATE_PARTITIONER_FACTORY(extern_or_nothing, type)     \
-  extern_or_nothing template StatusOr<unique_ptr<Partitioner<type>>>       \
-  PartitionerFactory<type>(                                                \
-      const TypedDataset<type>* dataset, const PartitioningConfig& config, \
-      shared_ptr<ThreadPool> training_parallelization_pool);               \
-  extern_or_nothing template StatusOr<unique_ptr<Partitioner<type>>>       \
-  PartitionerFactoryPreSampledAndProjected<type>(                          \
-      const TypedDataset<type>* dataset, const PartitioningConfig& config, \
+template <typename T, template <typename> typename Partitioner>
+Status MaybeAddTopLevelPartitioner(unique_ptr<Partitioner<T>>& partitioner,
+                                   const PartitioningConfig& config) {
+  if (!config.bottom_up_top_level_partitioner().enabled()) {
+    return OkStatus();
+  }
+  if (!dynamic_cast<KMeansTreeLikePartitioner<T>*>(partitioner.get())) {
+    return InvalidArgumentError(
+        "Top-level partitioner is only supported if the base partitioner "
+        "KMeansTreeLikePartitioner.");
+  }
+
+  auto is_second_level_wrapper =
+      [](const UntypedPartitioner& partitioner) -> bool {
+    return dynamic_cast<const TreeBruteForceSecondLevelWrapper<T>*>(
+        &partitioner);
+  };
+
+  const auto projected =
+      dynamic_cast<const KMeansTreeProjectingDecorator<T>*>(partitioner.get());
+  if (projected) {
+    if (is_second_level_wrapper(*projected->base_partitioner())) {
+      return OkStatus();
+    }
+    unique_ptr<KMeansTreeLikePartitioner<float>> cloned_base(
+        dynamic_cast<KMeansTreeLikePartitioner<float>*>(
+            projected->base_partitioner()->Clone().release()));
+    SCANN_RET_CHECK(cloned_base);
+    auto top_level_partitioner =
+        std::make_unique<TreeBruteForceSecondLevelWrapper<float>>(
+            std::move(cloned_base));
+    SCANN_RETURN_IF_ERROR(top_level_partitioner->CreatePartitioning(
+        config.bottom_up_top_level_partitioner()));
+    auto wrapped_top = std::make_unique<KMeansTreeProjectingDecorator<T>>(
+        projected->projection(), std::move(top_level_partitioner));
+    partitioner = std::move(wrapped_top);
+  } else {
+    if (is_second_level_wrapper(*partitioner)) {
+      return OkStatus();
+    }
+    unique_ptr<KMeansTreeLikePartitioner<T>> kmeans_tree_partitioner(
+        static_cast<KMeansTreeLikePartitioner<T>*>(partitioner.release()));
+    auto top_level_partitioner =
+        std::make_unique<TreeBruteForceSecondLevelWrapper<T>>(
+            std::move(kmeans_tree_partitioner));
+    SCANN_RETURN_IF_ERROR(top_level_partitioner->CreatePartitioning(
+        config.bottom_up_top_level_partitioner()));
+    partitioner = std::move(top_level_partitioner);
+  }
+  return OkStatus();
+}
+
+#define SCANN_INSTANTIATE_PARTITIONER_FACTORY(extern_or_nothing, type)         \
+  extern_or_nothing template StatusOr<unique_ptr<Partitioner<type>>>           \
+  PartitionerFactory<type>(                                                    \
+      const TypedDatasetView<type>* dataset, const PartitioningConfig& config, \
+      shared_ptr<ThreadPool> training_parallelization_pool);                   \
+  extern_or_nothing template StatusOr<unique_ptr<Partitioner<type>>>           \
+  PartitionerFactoryPreSampledAndProjected<type>(                              \
+      const TypedDatasetView<type>* dataset, const PartitioningConfig& config, \
       shared_ptr<ThreadPool> training_parallelization_pool);
 
 SCANN_INSTANTIATE_PARTITIONER_FACTORY(extern, int8_t);

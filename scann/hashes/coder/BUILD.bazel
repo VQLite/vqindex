@@ -1,0 +1,67 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+package(
+    default_visibility = ["//visibility:public"],
+    licenses = ["notice"],
+)
+
+cc_library(
+    name = "coder",
+    srcs = ["coder.cc"],
+    hdrs = ["coder.h"],
+    deps = [
+        "//scann/data_format:datapoint",
+        "//scann/data_format:dataset",
+        "//scann/data_format:features_cc_proto",
+        "//scann/distance_measures",
+        "//scann/distance_measures/one_to_one:dot_product",
+        "//scann/distance_measures/one_to_one:l2_distance",
+        "//scann/oss_wrappers:scann_aligned_malloc",
+        "//scann/oss_wrappers:scann_down_cast",
+        "//scann/oss_wrappers:scann_status",
+        "//scann/oss_wrappers:scann_threadpool",
+        "//scann/proto:coding_cc_proto",
+        "//scann/proto:hash_cc_proto",
+        "//scann/proto:hashed_cc_proto",
+        "//scann/utils:common",
+        "//scann/utils:scann_config_utils",
+        "//scann/utils:types",
+        "//scann/utils:util_functions",
+        "//scann/utils:zip_sort",
+        "//scann/utils/fixed_point:fixed_point_offline_preprocessing",
+        "@com_google_absl//absl/base",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "fixed_point_coder",
+    srcs = ["fixed_point_coder.cc"],
+    hdrs = ["fixed_point_coder.h"],
+    deps = [
+        ":coder",
+        "//scann/data_format:datapoint",
+        "//scann/data_format:dataset",
+        "//scann/data_format:features_cc_proto",
+        "//scann/distance_measures",
+        "//scann/distance_measures/one_to_many",
+        "//scann/distance_measures/one_to_many:scale_encoding_cc_proto",
+        "//scann/distance_measures/one_to_one:dot_product",
+        "//scann/proto:coding_cc_proto",
+        "//scann/proto:hash_cc_proto",
+        "//scann/proto:hashed_cc_proto",
+        "//scann/utils:common",
+        "//scann/utils:scalar_quantization_helpers",
+        "//scann/utils:scale_encoding_helpers",
+        "//scann/utils:types",
+        "//scann/utils/fixed_point:fixed_point_offline_preprocessing",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+    ],
+)

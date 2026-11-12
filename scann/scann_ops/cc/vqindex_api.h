@@ -52,6 +52,22 @@ typedef enum {
     RET_CODE_NOINIT = -8
 } ret_code_t;
 
+// How vqindex_dump_format writes the AH codes of a trained index.
+//  DUMP_FORMAT_PACKED  hashed_dataset_packed.bin: the codes as they are laid
+//                      out in memory.  Loads and dumps without the extra
+//                      copy the legacy file needs.  Not readable by
+//                      libraries built before this format existed.
+//  DUMP_FORMAT_LEGACY  hashed_dataset.npy, readable by every version.
+//  DUMP_FORMAT_BOTH    both files.
+// A dump removes the file of the form it does not write, so the index
+// directory never holds codes from two different states.  Loading uses the
+// packed file when the directory has one and the legacy file otherwise.
+typedef enum {
+    DUMP_FORMAT_PACKED = 0,
+    DUMP_FORMAT_LEGACY = 1,
+    DUMP_FORMAT_BOTH = 2
+} dump_format_t;
+
 struct index_config_s {
     index_type_t index_type_; // index type
     uint32_t dim_; // dimensions of vector point
@@ -93,7 +109,13 @@ void *vqindex_init(const char *index_dir, index_config_t config_i);
 
 void vqindex_release(void *vql_handler);
 
+// Dumps in the default format: DUMP_FORMAT_PACKED, or the value (0, 1 or 2)
+// of the environment variable VQINDEX_DUMP_FORMAT if it is set when the index
+// is opened.  The dump at the end of vqindex_train_process uses it as well.
 ret_code_t vqindex_dump(void *vql_handler);
+
+// Dumps in the given format; RET_CODE_ERR if it is not a dump_format_t value.
+ret_code_t vqindex_dump_format(void *vql_handler, dump_format_t format);
 
 // if nlist=0, use default nlist, it's only available to New[train_type].
 // nlist: number of partitioning leaves, If a dataset has n points,
@@ -114,6 +136,9 @@ ret_code_t vqindex_add(
         void *vql_handler, const float *datasets, uint64_t len, const int64_t *vids);
 
 // len: number of queries float, <len % dim_ == 0>
+// res: must hold (len / dim_) * params.topk_ items; params.topk_ must be > 0
+// (0 selects the internal default of 30 and res must then hold 30 per query).
+// Unused slots keep idx_ = 0, vid_ = 0, score_ = -1.
 ret_code_t vqindex_search(
         void *vql_handler, const float *queries, int len, result_search_t *res, params_search_t params);
 

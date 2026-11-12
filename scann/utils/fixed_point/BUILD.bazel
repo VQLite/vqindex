@@ -1,16 +1,59 @@
 # Builds libraries for ahead-of-time fixed-point preprocessing.
 
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_test")
+load("@com_google_protobuf//bazel:py_proto_library.bzl", "py_proto_library")
+load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
+
 package(
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],
 )
 
+proto_library(
+    name = "fixed_point_training_results",
+    srcs = ["fixed_point_training_results.proto"],
+    deps = [
+    ],
+)
+
+cc_proto_library(
+    name = "fixed_point_training_results_cc_proto",
+    deps = [":fixed_point_training_results"],
+)
+
+cc_library(
+    name = "fixed_point_offline_preprocessing",
+    srcs = ["fixed_point_offline_preprocessing.cc"],
+    hdrs = ["fixed_point_offline_preprocessing.h"],
+    deps = [
+        ":fixed_point_training_results_cc_proto",
+        "//scann/data_format:datapoint",
+        "//scann/data_format:features_cc_proto",
+        "//scann/distance_measures",
+        "//scann/distance_measures/one_to_many:scale_encoding_cc_proto",
+        "//scann/distance_measures/one_to_one:dot_product",
+        "//scann/distance_measures/one_to_one:l1_distance",
+        "//scann/distance_measures/one_to_one:l2_distance",
+        "//scann/oss_wrappers:scann_status",
+        "//scann/utils:common",
+        "//scann/utils:scalar_quantization_helpers",
+        "//scann/utils:scale_encoding_helpers",
+        "//scann/utils:top_n_amortized_constant",
+        "//scann/utils:types",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+    ],
+)
+
 cc_library(
     name = "pre_quantized_fixed_point",
     hdrs = ["pre_quantized_fixed_point.h"],
-    tags = ["local"],
     deps = [
         "//scann/data_format:dataset",
         "//scann/utils:types",
+        "@com_google_absl//absl/types:span",
     ],
 )

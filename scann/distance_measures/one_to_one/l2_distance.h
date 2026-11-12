@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,12 +15,16 @@
 #ifndef SCANN_DISTANCE_MEASURES_ONE_TO_ONE_L2_DISTANCE_H_
 #define SCANN_DISTANCE_MEASURES_ONE_TO_ONE_L2_DISTANCE_H_
 
+#include <cstddef>
 #include <cstdint>
 
+#include "hwy/highway.h"
+#include "scann/data_format/datapoint.h"
 #include "scann/distance_measures/distance_measure_base.h"
 #include "scann/distance_measures/one_to_one/common.h"
 #include "scann/distance_measures/one_to_one/l2_distance_avx1.h"
 #include "scann/distance_measures/one_to_one/l2_distance_sse4.h"
+#include "scann/utils/common.h"
 #include "scann/utils/intrinsics/flags.h"
 #include "scann/utils/reduction.h"
 #include "scann/utils/types.h"
@@ -57,12 +61,69 @@ struct Square {
   }
 };
 
+template <typename FloatT>
+double SquaredL2NormImplFloat(ConstSpan<FloatT> vec) {
+  namespace hn = hwy::HWY_NAMESPACE;
+  using D = hn::ScalableTag<FloatT>;
+  const D d;
+  using D2 = hn::ScalableTag<FloatT, -1>;
+  const D2 d2;
+  hn::Vec<D> a0 = hn::Zero(d);
+  hn::Vec<D> a1 = hn::Zero(d);
+  size_t i = 0;
+  for (; i + 2 * hn::Lanes(d) < vec.size(); i += 2 * hn::Lanes(d)) {
+    auto v0 = hn::LoadU(d, &vec[i]);
+    auto v1 = hn::LoadU(d, &vec[i + hn::Lanes(d)]);
+    a0 = hn::MulAdd(v0, v0, a0);
+    a1 = hn::MulAdd(v1, v1, a1);
+  }
+  if (i + hn::Lanes(d) < vec.size()) {
+    auto v0 = hn::LoadU(d, &vec[i]);
+    a0 = hn::MulAdd(v0, v0, a0);
+    i += hn::Lanes(d);
+  }
+  if (i + hn::Lanes(d2) < vec.size()) {
+    auto v1 = hn::ZeroExtendVector(d, hn::LoadU(d2, &vec[i]));
+    a1 = hn::MulAdd(v1, v1, a1);
+    i += hn::Lanes(d2);
+  }
+  FloatT result = hn::ReduceSum(d, a0 + a1);
+  for (; i < vec.size(); ++i) {
+    result += vec[i] * vec[i];
+  }
+  return result;
+}
+
 }  // namespace l2_distance_internal
 
 template <typename T>
+inline double SquaredL2NormFast(ConstSpan<T> vec) {
+  if constexpr (std::is_floating_point_v<T>) {
+    return l2_distance_internal::SquaredL2NormImplFloat<T>(vec);
+  } else {
+    return DenseSingleAccumulate(vec, l2_distance_internal::Square());
+  }
+}
+
+template <typename T>
+inline double SquaredL2Norm(ConstSpan<T> vec) {
+  return DenseSingleAccumulate(vec, l2_distance_internal::Square());
+}
+
+template <typename T>
+inline double SquaredL2NormFast(const DatapointPtr<T>& a) {
+  return SquaredL2NormFast(a.values_span());
+}
+template <typename T>
 inline double SquaredL2Norm(const DatapointPtr<T>& a) {
-  return DenseSingleAccumulate(a.values_slice(),
-                               l2_distance_internal::Square());
+  return SquaredL2Norm(a.values_span());
+}
+
+inline double SquaredL2NormFast(ConstSpan<float> vec) {
+  return SquaredL2NormFast<float>(vec);
+}
+inline double SquaredL2Norm(ConstSpan<float> vec) {
+  return SquaredL2Norm<float>(vec);
 }
 
 class SquaredL2Distance final : public DistanceMeasure {
@@ -226,11 +287,6 @@ inline double DenseSquaredL2Distance<double, double>(
 }
 
 #endif
-
-template <typename T, typename U>
-double DenseSquaredL2Norm(const DatapointPtr<T>& a, const DatapointPtr<U>& b) {
-  return DenseSquaredL2Distance(a, b);
-}
 
 }  // namespace research_scann
 

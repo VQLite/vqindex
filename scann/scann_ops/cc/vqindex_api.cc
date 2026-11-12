@@ -7,8 +7,14 @@
 
 #include "scann/scann_ops/cc/vqindex_api.h"
 
+#include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
+
+#include <cmath>
+#include <memory>
 
 #include <filesystem>
 #include <fstream>
@@ -24,8 +30,15 @@
 #include <thread>
 #include<sys/wait.h>
 
+#include "scann/base/single_machine_base.h"
+#include "scann/base/single_machine_factory_options.h"
+#include "scann/data_format/datapoint.h"
+#include "scann/data_format/dataset.h"
 #include "scann/scann_ops/cc/scann.h"
 #include "scann/utils/io_oss_wrapper.h"
+#include "scann/utils/packed_leaves_file.h"
+#include "scann/utils/threads.h"
+#include "scann/utils/types.h"
 
 using namespace research_scann;
 using namespace std;
@@ -43,13 +56,19 @@ public:
         , current_search_n_(0)
         , datasets_npoints_(0)
         , is_child_process_(false)
+        , stat_index_npoints_(0)
+        , stat_index_nlist_(0)
+        , stat_is_brute_(false)
+        , persisted_datasets_floats_(0)
+        , persisted_vids_(0)
     {
+        default_dump_format_ = DefaultDumpFormat();
         index_root_dir_ = ".";
         if (index_root_dir != NULL) {
             index_root_dir_ = index_root_dir;
         }
         storage_type_ = STORAGE_FILE;
-        if (storage_type_ >= STORAGE_FILE && storage_type_ <= STORAGE_MEMORY) {
+        if (config_i.storage_type_ >= STORAGE_FILE && config_i.storage_type_ <= STORAGE_MEMORY) {
             storage_type_ = config_i.storage_type_;
         }
 
@@ -77,18 +96,25 @@ public:
         return std::filesystem::file_size(file_path);
     }
 
+    // Lock-free apart from a short shared lock on the vid table, so that it
+    // can be polled while a train/add/dump is running.  The index figures come
+    // from the snapshot taken by RefreshIndexStats(); the index object itself
+    // must not be touched here because Train() may be replacing it.
     void GetStats(index_stats_t& stats)
     {
-        stats.datasets_size_ = datasets_npoints_;
-        stats.index_size_ = GetIndexPointsNum();
-        stats.vid_size_ = vids_.size();
-        stats.index_nlist_ = GetPartitioningSize();
+        stats.datasets_size_ = datasets_npoints_.load();
+        stats.index_size_ = stat_index_npoints_.load();
+        {
+            shared_lock<shared_mutex> rslk(smutex_vid_rwlock_);
+            stats.vid_size_ = vids_.size();
+        }
+        stats.index_nlist_ = stat_index_nlist_.load();
         stats.dim_ = dim_;
-        if (IsBrute()) {
+        if (stat_is_brute_.load()) {
             stats.is_brute_ = 1;
         }
         stats.brute_threshold_ = brute_threshold_;
-        stats.current_status_ = current_state_;
+        stats.current_status_ = current_state_.load();
     }
 
     bool LoadVids()
@@ -156,8 +182,11 @@ public:
         vids_.swap(t2);
 
         datasets_npoints_ = 0;
+        persisted_datasets_floats_ = 0;
+        persisted_vids_ = 0;
 
         ResetImpl();
+        RefreshIndexStats();
     }
     virtual void ResetImpl() { LOG(INFO) << "ResetImpl Unavailable"; }
 
@@ -171,6 +200,8 @@ public:
 
     ret_code_t Train(train_type_t train_type, uint32_t nlist, int32_t nthreads);
     ret_code_t TrainProcess(train_type_t train_type, uint32_t nlist, int32_t nthreads);
+    ret_code_t TrainInChildProcess(train_type_t train_type, uint32_t nlist, int32_t nthreads);
+    ret_code_t RunTrain(train_type_t train_type, uint32_t nlist, int32_t nthreads);
     ret_code_t TrainDefault(uint32_t nlist, int32_t nthreads);
     ret_code_t TrainNew(uint32_t nlist, int32_t nthreads);
     ret_code_t TrainAdd(int32_t nthreads);
@@ -181,9 +212,27 @@ public:
         return 0;
     }
 
-    ret_code_t Dump();
-    ret_code_t DoDump();
-    virtual int DumpImpl(std::string& index_dir)
+    static bool IsDumpFormat(int format)
+    {
+        return format == DUMP_FORMAT_PACKED || format == DUMP_FORMAT_LEGACY
+            || format == DUMP_FORMAT_BOTH;
+    }
+    static dump_format_t DefaultDumpFormat()
+    {
+        const char* env = getenv("VQINDEX_DUMP_FORMAT");
+        if (env != NULL && env[0] >= '0' && env[0] <= '2' && env[1] == '\0') {
+            return static_cast<dump_format_t>(env[0] - '0');
+        }
+        if (env != NULL && env[0] != '\0') {
+            LOG(INFO) << "ignoring VQINDEX_DUMP_FORMAT=" << env << " (expected 0, 1 or 2)";
+        }
+        return DUMP_FORMAT_PACKED;
+    }
+
+    ret_code_t Dump() { return Dump(default_dump_format_); }
+    ret_code_t Dump(dump_format_t format);
+    ret_code_t DoDump(dump_format_t format);
+    virtual int DumpImpl(std::string& index_dir, dump_format_t format)
     {
         LOG(INFO) << "DumpImpl Unavailable";
         return 0;
@@ -191,8 +240,10 @@ public:
 
     ret_code_t Search(const float* queries, int32_t len, std::vector<result_search_t>& res,
         params_search_t params);
+    // counts[i] is the number of valid results of query i; they occupy the
+    // first counts[i] of its topk slots in res.
     virtual int SearchImpl(const float* queries, int32_t npoints, std::vector<result_search_t>& res,
-        params_search_t params)
+        std::vector<uint32_t>& counts, params_search_t params)
     {
         LOG(INFO) << "SearchImpl Unavailable";
         return 0;
@@ -208,6 +259,45 @@ protected:
     ret_code_t AddDatasetsMemory(const float* datasets, uint64_t len, const int64_t* vids);
     ret_code_t AddDatasetsFile(const float* datasets, uint64_t len, const int64_t* vids);
 
+    // Snapshots the index figures reported by GetStats().  Call with exclusive
+    // access to the index (Init, or mutex_global_lock_ held).
+    void RefreshIndexStats()
+    {
+        stat_index_npoints_ = GetIndexPointsNum();
+        stat_index_nlist_ = GetPartitioningSize();
+        stat_is_brute_ = IsBrute();
+    }
+
+    // Leaves the ADD/TRAIN/DUMP state.  Same access requirement as above.
+    void RestoreState()
+    {
+        RefreshIndexStats();
+        if (stat_index_npoints_.load() > 0) {
+            current_state_ = INDEX_STATE_READY;
+        } else {
+            current_state_ = INDEX_STATE_NOINDEX;
+        }
+    }
+
+    // Brings `path` up to `total_bytes` of `data`.  When the file still holds
+    // exactly the first `persisted_bytes` written or loaded earlier, only the
+    // tail is appended; otherwise the whole file is rewritten.
+    bool WriteTailOrAll(
+        std::string& path, const char* data, size_t total_bytes, size_t persisted_bytes)
+    {
+        bool append = persisted_bytes > 0 && persisted_bytes <= total_bytes
+            && GetFileSize(path) == (int64_t)persisted_bytes;
+        std::ofstream outs(
+            path, append ? (ios::app | ios::binary) : (ios::out | ios::trunc | ios::binary));
+        if (!outs) {
+            return false;
+        }
+        size_t offset = append ? persisted_bytes : 0;
+        outs.write(data + offset, total_bytes - offset);
+        outs.close();
+        return !outs.fail();
+    }
+
     std::string index_root_dir_;
     std::string datasets_filename_;
     std::string vids_filename_;
@@ -216,19 +306,45 @@ protected:
     std::vector<float> datasets_;
     std::vector<int64_t> vids_;
 
-    uint64_t datasets_npoints_;
+    std::atomic<uint64_t> datasets_npoints_;
 
     uint32_t dim_; // dimensions of vector point
     storage_type_t storage_type_;
     uint64_t brute_threshold_;
 
+    // Locking:
+    //  * mutex_global_lock_ serializes AddDatasets / Train / Dump.  The
+    //    ADD/TRAIN/DUMP states are only entered and left while holding it.
+    //    Add and Train do not queue behind a running operation, they return
+    //    RET_CODE_NOREADY; Dump waits.
+    //  * Search takes no mutex for the index itself.  It registers in
+    //    current_search_n_ *before* reading current_state_, and Train sets
+    //    INDEX_STATE_TRAIN *before* waiting for current_search_n_ to reach 0,
+    //    so a search either backs off or is waited for before the index is
+    //    replaced or mutated.
+    //  * smutex_vid_rwlock_ guards vids_ between a writer (AddDatasets, which
+    //    also holds mutex_global_lock_) and lock-free readers (Search,
+    //    GetStats).  Order: mutex_global_lock_ -> smutex_vid_rwlock_.
     std::mutex mutex_global_lock_;
     std::shared_mutex smutex_vid_rwlock_;
     std::atomic<int> current_search_n_;
 
     bool is_child_process_;
 
-    index_state_t current_state_;
+    // Format used by vqindex_dump and by the dump after a child-process train.
+    dump_format_t default_dump_format_;
+
+    std::atomic<index_state_t> current_state_;
+
+    // Snapshot for GetStats(), see RefreshIndexStats().
+    std::atomic<uint64_t> stat_index_npoints_;
+    std::atomic<uint32_t> stat_index_nlist_;
+    std::atomic<bool> stat_is_brute_;
+
+    // STORAGE_MEMORY: how much of datasets_ / vids_ is known to be on disk
+    // (loaded by Init or written by Dump), so Dump only appends what is new.
+    uint64_t persisted_datasets_floats_;
+    uint64_t persisted_vids_;
 };
 
 bool VQLiteIndex::Init()
@@ -256,13 +372,12 @@ bool VQLiteIndex::Init()
     if (!ret) {
         Reset();
     } else {
-        if (index_npoints > 0) {
-            current_state_ = INDEX_STATE_READY;
-        } else {
-            current_state_ = INDEX_STATE_NOINDEX;
-        }
-
         datasets_npoints_ = datasets_npoints;
+        if (storage_type_ == STORAGE_MEMORY) {
+            persisted_datasets_floats_ = datasets_.size();
+            persisted_vids_ = vids_.size();
+        }
+        RestoreState();
     }
 
     return ret;
@@ -313,12 +428,16 @@ ret_code_t VQLiteIndex::AddDatasetsFile(const float* datasets, uint64_t len, con
 
 ret_code_t VQLiteIndex::AddDatasets(const float* datasets, uint64_t len, const int64_t* vids)
 {
-    if (current_state_ > INDEX_STATE_READY) {
-        return RET_CODE_NOREADY;
-    }
     if (len % dim_ != 0) {
-        LOG(INFO) << "!is_init_ || len % dim_ != 0; current_state_=" << current_state_;
+        LOG(INFO) << "len % dim_ != 0; len=" << len;
         return RET_CODE_DATAERR;
+    }
+
+    // Everything below, including reading the current sizes, has to happen
+    // under the lock: two concurrent adds must not start from the same offset.
+    std::unique_lock<std::mutex> guard(mutex_global_lock_, std::try_to_lock);
+    if (!guard.owns_lock() || current_state_ > INDEX_STATE_READY) {
+        return RET_CODE_NOREADY;
     }
 
     current_state_ = INDEX_STATE_ADD;
@@ -328,13 +447,11 @@ ret_code_t VQLiteIndex::AddDatasets(const float* datasets, uint64_t len, const i
     uint64_t new_npoints = now_npoints + add_npoints;
 
     if (vids_.capacity() < new_npoints) {
+        // Reallocation moves the table under concurrent readers.
         unique_lock<shared_mutex> wulk(smutex_vid_rwlock_);
         size_t new_capacity = vids_.capacity() + add_npoints + 400000;
         vids_.reserve(new_capacity);
-        wulk.unlock();
     }
-
-    std::lock_guard<std::mutex> guard(mutex_global_lock_);
 
     ret_code_t ret = RET_CODE_OK;
     if (storage_type_ == STORAGE_MEMORY) {
@@ -344,19 +461,17 @@ ret_code_t VQLiteIndex::AddDatasets(const float* datasets, uint64_t len, const i
     }
 
     if (ret == RET_CODE_OK) {
-        vids_.resize(new_npoints, 0);
-        memcpy(vids_.data() + now_npoints, vids, add_npoints * sizeof(int64_t));
-
+        {
+            unique_lock<shared_mutex> wulk(smutex_vid_rwlock_);
+            vids_.resize(new_npoints, 0);
+            memcpy(vids_.data() + now_npoints, vids, add_npoints * sizeof(int64_t));
+        }
         datasets_npoints_ += add_npoints;
     }
     LOG(INFO) << "vids_.size=" << vids_.size() << "; dataset.size=" << datasets_.size()
               << "; vids_.capacity()=" << vids_.capacity();
 
-    if (GetIndexPointsNum() > 0) {
-        current_state_ = INDEX_STATE_READY;
-    } else {
-        current_state_ = INDEX_STATE_NOINDEX;
-    }
+    RestoreState();
 
     return ret;
 }
@@ -391,7 +506,7 @@ ret_code_t VQLiteIndex::TrainDefault(uint32_t nlist, int32_t nthreads)
         datasets_npoints = datasets_.size() / dim_;
     }
 
-    if (datasets_npoints != vids_npoints || datasets_npoints < index_nlist * index_nlist * 2) {
+    if (datasets_npoints != vids_npoints || datasets_npoints < (int64_t)index_nlist * index_nlist * 2) {
         LOG(INFO) << "datasets_npoints != vids_npoints  TrainAdd: datasets_npoints="
                   << datasets_npoints << "; vids_npoints=" << vids_npoints;
         LOG(INFO) << "index_npoints=" << index_npoints << ";index_nlist=" << index_nlist;
@@ -498,85 +613,131 @@ ret_code_t VQLiteIndex::TrainAdd(int32_t nthreads)
     return RET_CODE_OK;
 }
 
+ret_code_t VQLiteIndex::RunTrain(train_type_t train_type, uint32_t nlist, int32_t nthreads)
+{
+    switch (train_type) {
+    case TRAIN_TYPE_NEW:
+        return TrainNew(nlist, nthreads);
+    case TRAIN_TYPE_ADD:
+        return TrainAdd(nthreads);
+    default:
+        return TrainDefault(nlist, nthreads);
+    }
+}
+
 ret_code_t VQLiteIndex::Train(train_type_t train_type, uint32_t nlist, int32_t nthreads)
 {
-    if (current_state_ > INDEX_STATE_READY) {
-        LOG(INFO) << "current_state_=" << current_state_;
+    std::unique_lock<std::mutex> guard(mutex_global_lock_, std::try_to_lock);
+    if (!guard.owns_lock() || current_state_ > INDEX_STATE_READY) {
+        LOG(INFO) << "busy, current_state_=" << current_state_.load();
         return RET_CODE_NOREADY;
     }
 
-    std::lock_guard<std::mutex> guard(mutex_global_lock_);
-
+    // From here on new searches back off (see Search); wait for the ones that
+    // registered before the state change.
     current_state_ = INDEX_STATE_TRAIN;
 
-    while (current_search_n_ > 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-        LOG(INFO) << "wait search = " << current_search_n_;
+    for (int waited_ms = 0; current_search_n_ > 0; waited_ms += 10) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (waited_ms % 1000 == 990) {
+            LOG(INFO) << "wait search = " << current_search_n_;
+        }
     }
 
-    ret_code_t ret = RET_CODE_OK;
-    switch (train_type) {
-    case TRAIN_TYPE_NEW:
-        ret = TrainNew(nlist, nthreads);
-        break;
-    case TRAIN_TYPE_ADD:
-        ret = TrainAdd(nthreads);
-        break;
-    default:
-        ret = TrainDefault(nlist, nthreads);
-        break;
-    }
+    ret_code_t ret = RunTrain(train_type, nlist, nthreads);
 
-    if (GetIndexPointsNum() > 0) {
-        current_state_ = INDEX_STATE_READY;
-    } else {
-        current_state_ = INDEX_STATE_NOINDEX;
-    }
+    RestoreState();
 
     return ret;
 }
 
+// Runs in the forked child, which has no other threads: no locking.
 ret_code_t VQLiteIndex::TrainProcess(train_type_t train_type, uint32_t nlist, int32_t nthreads)
 {
     is_child_process_ = true;
 
     if (current_state_ > INDEX_STATE_READY) {
-        LOG(INFO) << "current_state_=" << current_state_;
+        LOG(INFO) << "current_state_=" << current_state_.load();
         return RET_CODE_NOREADY;
     }
 
     current_state_ = INDEX_STATE_TRAIN;
 
-    ret_code_t ret = RET_CODE_OK;
-    switch (train_type) {
-    case TRAIN_TYPE_NEW:
-        ret = TrainNew(nlist, nthreads);
-        break;
-    case TRAIN_TYPE_ADD:
-        ret = TrainAdd(nthreads);
-        break;
-    default:
-        ret = TrainDefault(nlist, nthreads);
-        break;
-    }
+    ret_code_t ret = RunTrain(train_type, nlist, nthreads);
 
-    if (GetIndexPointsNum() > 0) {
-        current_state_ = INDEX_STATE_READY;
-    } else {
-        current_state_ = INDEX_STATE_NOINDEX;
-    }
+    RestoreState();
 
     return ret;
 }
 
-ret_code_t VQLiteIndex::DoDump()
+// Trains and dumps in a forked child.  This object is not updated: the caller
+// picks the new index up by releasing the handler and calling init again.
+ret_code_t VQLiteIndex::TrainInChildProcess(
+    train_type_t train_type, uint32_t nlist, int32_t nthreads)
+{
+    pid_t pid = 0;
+    {
+        // Fork while holding the lock so that the child never inherits a
+        // half-applied add/train/dump.  The lock is not kept while waiting.
+        std::unique_lock<std::mutex> guard(mutex_global_lock_, std::try_to_lock);
+        if (!guard.owns_lock() || current_state_ > INDEX_STATE_READY) {
+            LOG(INFO) << "busy, current_state_=" << current_state_.load();
+            return RET_CODE_NOREADY;
+        }
+
+        pid = fork();
+        if (pid == 0) {
+            // The child owns a copy of the locked mutex and never uses it
+            // (is_child_process_); it must not unlock it either.
+            guard.release();
+            ret_code_t cret_code = TrainProcess(train_type, nlist, nthreads);
+            if (cret_code == RET_CODE_OK) {
+                LOG(INFO) << "train suss, in dump.";
+                cret_code = Dump();
+            }
+            LOG(INFO) << "out child process, cret_code=" << cret_code;
+            // _exit: do not run the parent's atexit handlers / static
+            // destructors, nor flush its stdio buffers a second time.
+            // ret_code_t is 0 or negative, exit statuses are 0..255.
+            _exit(-(int)cret_code);
+        }
+    }
+    if (pid == -1) {
+        LOG(INFO) << "fork error: " << strerror(errno);
+        return RET_CODE_ERR;
+    }
+
+    LOG(INFO) << "in parent process, waitting child " << pid;
+    int child_status = 0;
+    while (waitpid(pid, &child_status, 0) == -1) {
+        if (errno != EINTR) {
+            LOG(INFO) << "waitpid error: " << strerror(errno);
+            return RET_CODE_ERR;
+        }
+    }
+
+    ret_code_t ret_code = RET_CODE_ERR;
+    if (WIFEXITED(child_status)) {
+        int code = WEXITSTATUS(child_status);
+        if (code >= 0 && code <= -(int)RET_CODE_NOINIT) {
+            ret_code = (ret_code_t)(-code);
+        }
+    } else if (WIFSIGNALED(child_status)) {
+        LOG(INFO) << "child killed by signal " << WTERMSIG(child_status);
+    }
+    LOG(INFO) << "out parent process, ret_code=" << ret_code << "; child_status=" << child_status;
+
+    return ret_code;
+}
+
+ret_code_t VQLiteIndex::DoDump(dump_format_t format)
 {
     std::error_code ec;
     std::string index_dir = index_root_dir_ + "/" + index_subdir_name_;
     ret_code_t ret = RET_CODE_OK;
 
     if (current_state_ > INDEX_STATE_READY) {
-        LOG(INFO) << "current_state_=" << current_state_;
+        LOG(INFO) << "current_state_=" << current_state_.load();
         return RET_CODE_NOREADY;
     }
 
@@ -587,75 +748,75 @@ ret_code_t VQLiteIndex::DoDump()
         ret = RET_CODE_NOPERMISSION;
         goto end;
     }
-    if (DumpImpl(index_dir) != 0) {
+    if (DumpImpl(index_dir, format) != 0) {
         LOG(INFO) << "Dump Index Fail.";
         ret = RET_CODE_INDEXERR;
         goto end;
     }
     if (storage_type_ == STORAGE_MEMORY) {
+        // Both files only ever grow, so only what was added since the last
+        // load/dump is written.
         std::string vids_file_path = index_root_dir_ + "/" + vids_filename_;
-        std::ofstream outs_vids(vids_file_path, ios::out | ios::binary);
-        if (!outs_vids) {
-            ret = RET_CODE_NOPERMISSION;
-            goto end;
-        }
-        outs_vids.write((char*)vids_.data(), vids_.size() * sizeof(int64_t));
-        outs_vids.close();
-        if (outs_vids.bad()) {
+        if (!WriteTailOrAll(vids_file_path, (const char*)vids_.data(),
+                vids_.size() * sizeof(int64_t), persisted_vids_ * sizeof(int64_t))) {
             LOG(INFO) << "Dump vids Fail.";
+            persisted_vids_ = 0;
             ret = RET_CODE_NOPERMISSION;
             goto end;
         }
+        persisted_vids_ = vids_.size();
 
         std::string datasets_file_path = index_root_dir_ + "/" + datasets_filename_;
-        std::ofstream outs_datasets(datasets_file_path, ios::out | ios::binary);
-        if (!outs_datasets) {
-            ret = RET_CODE_NOPERMISSION;
-            goto end;
-        }
-        outs_datasets.write((char*)datasets_.data(), datasets_.size() * sizeof(float));
-        outs_datasets.close();
-        if (outs_datasets.bad()) {
+        if (!WriteTailOrAll(datasets_file_path, (const char*)datasets_.data(),
+                datasets_.size() * sizeof(float), persisted_datasets_floats_ * sizeof(float))) {
             LOG(INFO) << "Dump Datasets Fail.";
+            persisted_datasets_floats_ = 0;
             ret = RET_CODE_NOPERMISSION;
             goto end;
         }
+        persisted_datasets_floats_ = datasets_.size();
     }
 
 end:
-    if (GetIndexPointsNum() > 0) {
-        current_state_ = INDEX_STATE_READY;
-    } else {
-        current_state_ = INDEX_STATE_NOINDEX;
-    }
+    RestoreState();
     return ret;
 }
 
-ret_code_t VQLiteIndex::Dump()
+ret_code_t VQLiteIndex::Dump(dump_format_t format)
 {
+    if (!IsDumpFormat(format)) {
+        LOG(INFO) << "unknown dump format " << static_cast<int>(format);
+        return RET_CODE_ERR;
+    }
     if (this->is_child_process_) {
-        return this->DoDump();
+        return this->DoDump(format);
     }
     std::lock_guard<std::mutex> guard(mutex_global_lock_);
-    return this->DoDump();
+    return this->DoDump(format);
 }
 
 ret_code_t VQLiteIndex::Search(
     const float* queries, int32_t len, std::vector<result_search_t>& res, params_search_t params)
 {
-    if (current_state_ == INDEX_STATE_TRAIN || current_state_ < INDEX_STATE_READY) {
-        LOG(INFO) << "current_state_ = INDEX_STATE_TRAIN|INDEX_STATE_NOINDEX";
-        return RET_CODE_NOREADY;
-    }
-
     int32_t npoints = len / dim_;
     if (len % dim_ != 0) {
         LOG(INFO) << "Query Len % Dim != 0";
         return RET_CODE_DATAERR;
     }
 
+    // Register first, then look at the state: Train() does the opposite (sets
+    // the state, then waits for the counter), so it can never replace the index
+    // under a search that got past this check.
     current_search_n_++;
-    int ret_s = SearchImpl(queries, npoints, res, params);
+    index_state_t state = current_state_.load();
+    if (state == INDEX_STATE_TRAIN || state < INDEX_STATE_READY) {
+        current_search_n_--;
+        LOG(INFO) << "current_state_ = INDEX_STATE_TRAIN|INDEX_STATE_NOINDEX";
+        return RET_CODE_NOREADY;
+    }
+
+    std::vector<uint32_t> counts;
+    int ret_s = SearchImpl(queries, npoints, res, counts, params);
     current_search_n_--;
 
     if (ret_s != 0) {
@@ -669,10 +830,16 @@ ret_code_t VQLiteIndex::Search(
         return RET_CODE_ERR;
     }
 
+    // Valid results are identified by their count, not by the sign of the
+    // score: a real hit can have a negative inner product.
+    size_t topk = counts.empty() ? 0 : res.size() / counts.size();
     shared_lock<shared_mutex> rslk(smutex_vid_rwlock_);
-    for (size_t i : Seq(res.size())) {
-        if (res[i].score_ >= 0) {
-            res[i].vid_ = vids_[res[i].idx_];
+    for (size_t i : Seq(counts.size())) {
+        for (size_t j = 0; j < counts[i] && j < topk; j++) {
+            result_search_t& item = res[i * topk + j];
+            if (item.idx_ < vids_.size()) {
+                item.vid_ = vids_[item.idx_];
+            }
         }
     }
     return RET_CODE_OK;
@@ -717,7 +884,7 @@ public:
         return content;
     }
 
-    std::string GetAssetsInfo(std::string& index_dir)
+    std::string GetAssetsInfo(std::string& index_dir, bool packed_hashes)
     {
         std::string assets_info = "assets { \n\
                 asset_type: AH_CENTERS \n\
@@ -732,8 +899,8 @@ public:
                 asset_path: \"$index_dir/datapoint_to_token.npy\" \n\
             } \n\
             assets { \n\
-                asset_type: AH_DATASET_NPY \n\
-                asset_path: \"$index_dir/hashed_dataset.npy\" \n\
+                asset_type: $hashed_type \n\
+                asset_path: \"$index_dir/$hashed_file\" \n\
             } \n\
             assets { \n\
                 asset_type: INT8_DATASET_NPY \n\
@@ -756,16 +923,26 @@ public:
         if (is_brute_) {
             return std::regex_replace(assets_info_brute, std::regex("\\$index_dir"), index_dir);
         }
+        assets_info = std::regex_replace(assets_info, std::regex("\\$hashed_type"),
+            packed_hashes ? "AH_DATASET_PACKED_LEAVES" : "AH_DATASET_NPY");
+        assets_info = std::regex_replace(assets_info, std::regex("\\$hashed_file"),
+            packed_hashes ? kPackedLeavesFilename : "hashed_dataset.npy");
         return std::regex_replace(assets_info, std::regex("\\$index_dir"), index_dir);
     }
 
     bool CheckIndexFiles(std::string& index_dir)
     {
         std::string index_files[] = { "scann_config.pb", "ah_codebook.pb",
-            "serialized_partitioner.pb", "datapoint_to_token.npy", "hashed_dataset.npy",
+            "serialized_partitioner.pb", "datapoint_to_token.npy",
             "int8_dataset.npy", "int8_multipliers.npy", "dp_norms.npy" };
 
-        bool ret = true;
+        // The AH codes come in either form (see dump_format_t).
+        std::string packed_file = index_dir + "/" + kPackedLeavesFilename;
+        std::string legacy_file = index_dir + "/hashed_dataset.npy";
+        has_packed_hashes_ = IsExists(packed_file);
+        has_legacy_hashes_ = IsExists(legacy_file);
+
+        bool ret = has_packed_hashes_ || has_legacy_hashes_;
         for (size_t i : Seq(sizeof(index_files) / sizeof(index_files[0]))) {
             std::string index_file = index_dir + "/" + index_files[i];
             if (!IsExists(index_file)) {
@@ -821,7 +998,7 @@ public:
                     spilling_type: FIXED_NUMBER_OF_CENTERS \n\
                     max_spill_centers: %d \n\
                 } \n\
-                expected_sample_size: %d \n\
+                expected_sample_size: %lld \n\
                 query_tokenization_distance_override {distance_measure: \"DotProductDistance\"} \n\
                 partitioning_type: GENERIC \n\
                 query_tokenization_type: FLOAT \n\
@@ -830,7 +1007,7 @@ public:
                 asymmetric_hash { \n\
                     lookup_type: INT8_LUT16 \n\
                     use_residual_quantization: True \n\
-                    use_global_topn: True \n\
+                    use_global_topn: False \n\
                     quantization_distance { \n\
                         distance_measure: \"SquaredL2Distance\" \n\
                     } \n\
@@ -842,7 +1019,7 @@ public:
                         num_dims_per_block: 2 \n\
                     } \n\
                     noise_shaping_threshold: 0.2 \n\
-                    expected_sample_size: %d \n\
+                    expected_sample_size: %lld \n\
                     max_clustering_iterations: 10 \n\
                 } \n\
             } \n\
@@ -862,17 +1039,17 @@ public:
         if (hash_expected_sample_size <= nlist) {
             hash_expected_sample_size = datasets_train_size;
         }
-        int size_s = std::snprintf(nullptr, 0, config_format.c_str(), topk_, nlist, nprobe_,
-            partitioning_expected_sample_size, dim_, dim_ / 2, hash_expected_sample_size,
-            reorder_topk_);
+        int size_s = std::snprintf(nullptr, 0, config_format.c_str(), (int)topk_, (int)nlist, (int)nprobe_,
+            (long long)partitioning_expected_sample_size, (int)dim_, (int)(dim_ / 2),
+            (long long)hash_expected_sample_size, (int)reorder_topk_);
         if (size_s <= 0) {
             return std::string();
         }
         auto size = static_cast<size_t>(size_s + 1);
         std::unique_ptr<char[]> buf(new char[size]);
-        std::snprintf(buf.get(), size, config_format.c_str(), topk_, nlist, nprobe_,
-            partitioning_expected_sample_size, dim_, dim_ / 2, hash_expected_sample_size,
-            reorder_topk_);
+        std::snprintf(buf.get(), size, config_format.c_str(), (int)topk_, (int)nlist, (int)nprobe_,
+            (long long)partitioning_expected_sample_size, (int)dim_, (int)(dim_ / 2),
+            (long long)hash_expected_sample_size, (int)reorder_topk_);
         return std::string(buf.get(), buf.get() + size - 1);
     }
 
@@ -880,11 +1057,11 @@ public:
     int AddImpl(std::vector<float>& datasets, uint64_t npoints, int32_t nthreads) override;
     int TrainImpl(
         std::vector<float>& datasets, uint64_t npoints, uint32_t nlist, int32_t nthreads) override;
-    int DumpImpl(std::string& index_dir) override;
+    int DumpImpl(std::string& index_dir, dump_format_t format) override;
     int SearchImpl(const float* queries, int32_t npoints, std::vector<result_search_t>& res,
-        params_search_t params) override;
+        std::vector<uint32_t>& counts, params_search_t params) override;
 
-    size_t GetIndexPointsNum()
+    size_t GetIndexPointsNum() override
     {
         if (scann_handler_ == NULL) {
             return 0;
@@ -905,7 +1082,12 @@ public:
         if (scann_handler_ == NULL) {
             return 0;
         }
-        return scann_handler_->GetPartitioningSize();
+        // Number of partitions the index was trained with (0 for brute force).
+        const ScannConfig* config = scann_handler_->config();
+        if (config == NULL || !config->has_partitioning()) {
+            return 0;
+        }
+        return config->partitioning().num_children();
     }
 
     virtual bool IsBrute() override { return is_brute_; }
@@ -919,6 +1101,9 @@ private:
     float partitioning_train_sample_rate_; // default 0.2
     float hash_train_sample_rate_; // default 0.1
     bool is_brute_;
+    // Set by CheckIndexFiles: which forms of the AH codes are on disk.
+    bool has_packed_hashes_ = false;
+    bool has_legacy_hashes_ = false;
 };
 
 bool VQLiteIndexScann::InitImpl(std::string& index_dir)
@@ -932,17 +1117,44 @@ bool VQLiteIndexScann::InitImpl(std::string& index_dir)
         return false;
     }
 
-    string scann_assets_pbtxt = GetAssetsInfo(index_dir);
+    // The packed codes are used when the directory has them.
+    bool use_packed = !is_brute_ && has_packed_hashes_;
+    string scann_assets_pbtxt = GetAssetsInfo(index_dir, use_packed);
 
     ScannConfig config;
-    ReadProtobufFromFile(string(index_dir) + "/scann_config.pb", &config);
-
-    Status ret = scann_handler->Initialize(config.DebugString(), scann_assets_pbtxt);
+    Status ret = ReadProtobufFromFile(string(index_dir) + "/scann_config.pb", &config);
+    if (ret.ok() && config.has_hash() && config.hash().has_asymmetric_hash()) {
+        // Indexes written by earlier versions have use_global_topn set.  With
+        // it this ScaNN scans every leaf through LUT16 GetTopFloatDistances;
+        // without it the leaves are scanned with int16 accumulators (what
+        // ScaNN 1.2.9 did for batched search), which is markedly faster on
+        // large leaves.  It is a search-time switch only: the stored index is
+        // the same either way.
+        config.mutable_hash()->mutable_asymmetric_hash()->set_use_global_topn(false);
+    }
+    if (ret.ok()) {
+        ret = scann_handler->Initialize(config.DebugString(), scann_assets_pbtxt);
+        if (!ret.ok() && use_packed && has_legacy_hashes_) {
+            // E.g. a library without packed support dumped into this
+            // directory after the packed file was written, which leaves the
+            // packed file describing an older state.
+            LOG(INFO) << "cannot load " << kPackedLeavesFilename << " (" << ret.message()
+                      << "); loading hashed_dataset.npy instead";
+            delete scann_handler;
+            scann_handler = new ScannInterface();
+            scann_assets_pbtxt = GetAssetsInfo(index_dir, false);
+            ret = scann_handler->Initialize(config.DebugString(), scann_assets_pbtxt);
+        }
+    }
     if (!ret.ok()) {
         delete scann_handler;
-        LOG(INFO) << ret.error_message();
+        LOG(INFO) << ret.message();
         return false;
     }
+    // ScannInterface starts a (NumCPUs - 1)-thread pool per index for
+    // SearchBatchedParallel, which VQIndex never calls.  Drop it so that every
+    // open index does not keep a full set of idle threads.
+    scann_handler->SetNumThreads(0);
 
     this->scann_handler_ = scann_handler;
     LOG(INFO) << "index npoints=" << GetIndexPointsNum();
@@ -960,14 +1172,85 @@ int VQLiteIndexScann::AddImpl(std::vector<float>& datasets, uint64_t npoints, in
         return -2;
     }
 
-    return this->scann_handler_->Add2Index(datasets, npoints, nthreads);
+    // The index is extended through ScaNN's own mutation API rather than by
+    // patching its internals: every new point is tokenized with the existing
+    // partitioner, its residual is hashed with the existing AH codebook and
+    // appended to its leaf, and its int8 copy is appended to the fixed-point
+    // reordering dataset.  Centroids and codebooks are left untouched, and new
+    // points get consecutive datapoint indices starting at n_points(), which is
+    // what keeps them aligned with vids_.
+    using Mutator = SingleMachineSearcherBase<float>::Mutator;
+    using MutationOptions = UntypedSingleMachineSearcherBase::MutationOptions;
+
+    if (npoints == 0) {
+        return 0;
+    }
+    if (npoints * dim_ != datasets.size()) {
+        LOG(INFO) << "datasets.size[" << datasets.size() << "] != npoints[" << npoints
+                  << "] * dim[" << dim_ << "]";
+        return -1;
+    }
+
+    auto mutator_or = this->scann_handler_->GetMutator();
+    if (!mutator_or.ok()) {
+        LOG(INFO) << "GetMutator Fail: " << mutator_or.status().message();
+        return -1;
+    }
+    Mutator* mutator = mutator_or.value();
+
+    int32_t num_threads = nthreads;
+    int32_t num_cpus = std::max<int32_t>(std::thread::hardware_concurrency(), 1);
+    if (num_threads <= 0 || num_threads > num_cpus) {
+        num_threads = std::max(num_cpus - 1, 1);
+    }
+    std::shared_ptr<ThreadPool> pool = StartThreadPool("AddIndex", num_threads);
+
+    const size_t old_npoints = GetIndexPointsNum();
+    mutator->Reserve(old_npoints + npoints);
+
+    // Tokenizing + hashing is the expensive part and runs on the pool, one
+    // batch at a time; appending to the leaves must be sequential.
+    const size_t batch_size = std::max<size_t>(1024, static_cast<size_t>(num_threads) * 256);
+    int ret = 0;
+    for (size_t begin = 0; begin < npoints && ret == 0; begin += batch_size) {
+        const size_t bs = std::min<size_t>(batch_size, npoints - begin);
+        std::vector<float> batch_vec(datasets.begin() + begin * dim_,
+            datasets.begin() + (begin + bs) * dim_);
+        DenseDataset<float> batch(std::move(batch_vec), bs);
+        auto precomputed = mutator->ComputePrecomputedMutationArtifacts(batch, pool);
+
+        for (size_t i = 0; i < bs; i++) {
+            if (precomputed[i] == nullptr) {
+                LOG(INFO) << "Precompute Fail: point=" << begin + i;
+                ret = -1;
+                break;
+            }
+            MutationOptions mo;
+            mo.precomputed_mutation_artifacts = precomputed[i].get();
+            auto idx_or = mutator->AddDatapoint(batch[i], "", mo);
+            if (!idx_or.ok()) {
+                LOG(INFO) << "AddDatapoint Fail: " << idx_or.status().message();
+                ret = -1;
+                break;
+            }
+            if (idx_or.value() != old_npoints + begin + i) {
+                LOG(INFO) << "AddDatapoint idx=" << idx_or.value() << "; expected="
+                          << old_npoints + begin + i;
+                ret = -1;
+                break;
+            }
+        }
+    }
+
+    LOG(INFO) << "old_npoints=" << old_npoints << "; add npoints=" << npoints
+              << "; index npoints=" << GetIndexPointsNum() << "; ret=" << ret;
+    return ret;
 }
 
 int VQLiteIndexScann::TrainImpl(
     std::vector<float>& datasets, uint64_t npoints, uint32_t nlist, int32_t nthreads)
 {
-    ScannInterface* scann_handler = new ScannInterface();
-    if (scann_handler == NULL) {
+    if (nthreads < 0) {
         return -1;
     }
 
@@ -977,40 +1260,89 @@ int VQLiteIndexScann::TrainImpl(
             nlist = 2;
         }
     }
+    // GetScannConfig() switches is_brute_ to what the new index will be; it is
+    // put back if the new index does not materialize, because the current
+    // index (if any) stays in place then.
+    const bool old_is_brute = is_brute_;
     std::string config = GetScannConfig(npoints, nlist);
     if (config.empty()) {
+        is_brute_ = old_is_brute;
         return -1;
     }
+
+    std::unique_ptr<ScannInterface> scann_handler(new ScannInterface());
 
     std::vector<float>*datasets_pre = &datasets, datasets_t;
     if (is_brute_) {
         datasets_t = datasets;
         datasets_pre = &datasets_t;
     }
-    Status ret = scann_handler->Initialize(*datasets_pre, npoints, config, nthreads, !is_brute_);
+    int32_t training_threads = nthreads;
+    if (training_threads == 0) {
+        training_threads = std::max<int32_t>(std::thread::hardware_concurrency(), 1);
+    }
+
+    ScannConfig scann_config;
+    SingleMachineFactoryOptions opts;
+    opts.parallelization_pool = StartThreadPool("scann_threadpool", training_threads - 1);
+
+    // The vector is moved into the DenseDataset (no copy of the float data) and
+    // moved back once ScaNN has built the index and no longer references it.
+    shared_ptr<DenseDataset<float>> dataset_den
+        = std::make_shared<DenseDataset<float>>(std::move(*datasets_pre), npoints);
+
+    Status ret = ParseTextProto(&scann_config, config);
+    if (ret.ok()) {
+        ret = scann_handler->Initialize(
+            std::make_tuple(scann_config, dataset_den, std::move(opts)));
+    }
+
+    if (!is_brute_ || !ret.ok()) {
+        bool still_needed = false;
+        if (ret.ok()) {
+            auto needed_or = scann_handler->Float32DatasetIfNeeded();
+            still_needed = !needed_or.ok() || needed_or.value() != nullptr;
+        }
+        if (still_needed) {
+            // ScaNN kept a reference to the float dataset; leave it alone and
+            // hand the caller a copy instead.
+            LOG(INFO) << "float dataset is still referenced by the index, copying it back";
+            ConstSpan<float> data = dataset_den->data();
+            *datasets_pre = std::vector<float>(data.begin(), data.end());
+        } else {
+            *datasets_pre = dataset_den->ClearRecyclingDataVector();
+        }
+    }
     if (!ret.ok()) {
-        LOG(INFO) << ret.error_message();
-        delete scann_handler;
+        LOG(INFO) << ret.message();
+        is_brute_ = old_is_brute;
         return -1;
     }
+    scann_handler->SetNumThreads(0);
 
     if (!this->is_child_process_ && this->scann_handler_ != NULL) {
         delete this->scann_handler_;
     }
-    this->scann_handler_ = scann_handler;
+    this->scann_handler_ = scann_handler.release();
     LOG(INFO) << "index npoints=" << GetIndexPointsNum() << "; default_nlist=" << nlist
               << "; is_brute=" << is_brute_;
     return 0;
 }
 
-int VQLiteIndexScann::DumpImpl(std::string& index_dir)
+int VQLiteIndexScann::DumpImpl(std::string& index_dir, dump_format_t format)
 {
     if (scann_handler_ == NULL) {
         return 0;
     }
-    StatusOr<ScannAssets> assets_or = scann_handler_->Serialize(index_dir);
+    ScannInterface::HashedFormat hashed_format = ScannInterface::kHashedPacked;
+    if (format == DUMP_FORMAT_LEGACY) {
+        hashed_format = ScannInterface::kHashedNpy;
+    } else if (format == DUMP_FORMAT_BOTH) {
+        hashed_format = ScannInterface::kHashedBoth;
+    }
+    StatusOr<ScannAssets> assets_or = scann_handler_->Serialize(index_dir, false, hashed_format);
     if (!assets_or.ok()) {
-        LOG(INFO) << assets_or.status().error_message();
+        LOG(INFO) << assets_or.status().message();
         return -1;
     }
     Status ret = OpenSourceableFileWriter(index_dir + "/scann_assets.pbtxt")
@@ -1022,7 +1354,7 @@ int VQLiteIndexScann::DumpImpl(std::string& index_dir)
 }
 
 int VQLiteIndexScann::SearchImpl(const float* queries, int32_t npoints,
-    std::vector<result_search_t>& res, params_search_t params)
+    std::vector<result_search_t>& res, std::vector<uint32_t>& counts, params_search_t params)
 {
     if (scann_handler_ == NULL) {
         LOG(INFO) << "scann_handler_ == NULL";
@@ -1030,9 +1362,9 @@ int VQLiteIndexScann::SearchImpl(const float* queries, int32_t npoints,
     }
 
     vector<float> queries_vec(queries, queries + npoints * dim_);
-    auto query_dataset = DenseDataset<float>(queries_vec, npoints);
+    auto query_dataset = DenseDataset<float>(std::move(queries_vec), npoints);
 
-    std::vector<std::vector<std::pair<uint32_t, float>>> s_res;
+    std::vector<NNResultsVector> s_res;
     s_res.resize(npoints);
     int32_t topk = topk_;
     if (params.topk_ > 0) {
@@ -1049,7 +1381,7 @@ int VQLiteIndexScann::SearchImpl(const float* queries, int32_t npoints,
     Status status = scann_handler_->SearchBatched(
         query_dataset, MakeMutableSpan(s_res), topk, reorder_topk, nprobe);
     if (!status.ok()) {
-        LOG(INFO) << "search error: " << status.error_message();
+        LOG(INFO) << "search error: " << status.message();
         return -2;
     }
 
@@ -1057,9 +1389,12 @@ int VQLiteIndexScann::SearchImpl(const float* queries, int32_t npoints,
     item.idx_ = 0;
     item.score_ = -1;
     item.vid_ = 0;
-    res.resize(npoints * topk, item);
+    res.assign((size_t)npoints * topk, item);
+    counts.assign(npoints, 0);
     for (size_t i : Seq(s_res.size())) {
-        for (size_t j : Seq(s_res[i].size())) {
+        size_t n = std::min<size_t>(s_res[i].size(), topk);
+        counts[i] = n;
+        for (size_t j : Seq(n)) {
             res[i * topk + j].idx_ = s_res[i][j].first;
             res[i * topk + j].score_ = -1 * s_res[i][j].second;
         }
@@ -1085,6 +1420,7 @@ void* vqindex_init(const char* index_dir, index_config_t config_i)
 
     if (!vql_index->Init()) {
         LOG(INFO) << "Init Fail.";
+        delete vql_index;
         return NULL;
     }
 
@@ -1105,6 +1441,16 @@ ret_code_t vqindex_dump(void* vql_handler)
         return RET_CODE_NOINIT;
     }
     return vql_index->Dump();
+}
+
+ret_code_t vqindex_dump_format(void* vql_handler, dump_format_t format)
+{
+    VQLiteIndex* vql_index = static_cast<VQLiteIndex*>(vql_handler);
+    if (vql_index == NULL) {
+        LOG(INFO) << "vql_handler NULL";
+        return RET_CODE_NOINIT;
+    }
+    return vql_index->Dump(format);
 }
 
 // topk=>final_nn, reorder_topk=>pre_reorder_nn, nprobe=>leaves
@@ -1150,38 +1496,12 @@ ret_code_t vqindex_train(
 ret_code_t vqindex_train_process(
     void *vql_handler, train_type_t train_type, uint32_t nlist, int32_t nthreads)
 {
-    ret_code_t ret_code = RET_CODE_OK;
-    int child_status = 0;
-    pid_t pid = 0;
-
     VQLiteIndex *vql_index = static_cast<VQLiteIndex *>(vql_handler);
     if (vql_index == NULL) {
         LOG(INFO) << "vql_handler NULL";
         return RET_CODE_NOINIT;
     }
-
-    pid = fork(); 
-    if (pid == -1) {
-        LOG(INFO) << "fork error.";
-        return RET_CODE_ERR;
-    } else if (pid == 0) {
-        LOG(INFO) << "in child process, pid=" << pid;
-        ret_code_t cret_code = vql_index->TrainProcess(train_type, nlist, nthreads);
-        if (cret_code == RET_CODE_OK) {
-            LOG(INFO) << "train suss, in dump.";
-            cret_code = vql_index->Dump();
-            LOG(INFO) << "out dump, cret_code=" << cret_code;
-        }
-        LOG(INFO) << "out child process, pid=" << pid << "; cret_code=" << cret_code;
-        exit(cret_code);
-    } else {
-        LOG(INFO) << "in parent process, waitting.";
-        wait(&child_status);
-        ret_code = (ret_code_t)child_status;
-        LOG(INFO) << "out parent process, ret_code=" << ret_code << "; child_status" << child_status;
-    }
-
-    return ret_code;
+    return vql_index->TrainInChildProcess(train_type, nlist, nthreads);
 }
 
 

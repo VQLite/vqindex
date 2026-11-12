@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,11 +19,13 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <optional>
 
+#include "absl/base/prefetch.h"
 #include "absl/types/optional.h"
 #include "scann/oss_wrappers/scann_malloc_extension.h"
-#include "scann/utils/types.h"
+#include "scann/utils/common.h"
 
 namespace research_scann {
 
@@ -54,7 +56,8 @@ class ShortStringOptimizedString {
     rhs.ClearNoFree();
   }
 
-  ShortStringOptimizedString& operator=(ShortStringOptimizedString&& rhs) {
+  ShortStringOptimizedString& operator=(
+      ShortStringOptimizedString&& rhs) noexcept {
     this->~ShortStringOptimizedString();
     memcpy(storage_, rhs.storage_, kStorageSize);
     rhs.ClearNoFree();
@@ -63,6 +66,12 @@ class ShortStringOptimizedString {
 
   const char* data() const {
     return (size() <= kMaxInline) ? storage_ : heap_string();
+  }
+
+  void prefetch() const {
+    if (size() > kMaxInline) {
+      absl::PrefetchToLocalCache(heap_string());
+    }
   }
 
   uint32_t size() const {

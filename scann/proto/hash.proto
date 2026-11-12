@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -68,13 +68,11 @@ message AsymmetricHasherConfig {
 
   optional bool use_residual_quantization = 22 [default = false];
 
-  optional bool use_normalized_residual_quantization = 32 [default = false];
-
   optional double noise_shaping_threshold = 28 [default = nan];
 
   optional bool use_norm_biasing_correction = 31 [default = false];
 
-  optional bool use_global_topn = 33 [default = false];
+  optional bool use_global_topn = 33 [default = true];
 
   message FixedPointLUTConversionOptions {
     enum FloatToIntConversionMethod {
@@ -141,6 +139,8 @@ message AsymmetricHasherConfig {
       [default = 0.0, deprecated = true];
   optional float min_cluster_size = 19 [default = 1.0, deprecated = true];
   optional bool use_single_machine_trainer = 8
+      [default = false, deprecated = true];
+  optional bool use_normalized_residual_quantization = 32
       [default = false, deprecated = true];
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,15 +17,15 @@
 namespace tensorflow {
 namespace scann_ops {
 
-Status TensorFromProto(OpKernelContext* context, absl::string_view name,
-                       const protobuf::MessageLite* proto) {
+absl::Status TensorFromProto(OpKernelContext* context, absl::string_view name,
+                             const protobuf::MessageLite* proto) {
   if (proto == nullptr) return EmptyTensor(context, name);
 
   Tensor* tensor;
   TF_RETURN_IF_ERROR(context->allocate_output(name, TensorShape({1}), &tensor));
 
   if (!SerializeToTString(*proto, &tensor->scalar<tstring>()()))
-    return errors::Internal(
+    return absl::InternalError(
         absl::StrCat("Failed to create string tensor ", name));
   return OkStatus();
 }
@@ -35,7 +35,7 @@ void TensorFromProtoRequireOk(OpKernelContext* context, absl::string_view name,
   OP_REQUIRES_OK(context, TensorFromProto(context, name, proto));
 }
 
-Status EmptyTensor(OpKernelContext* context, absl::string_view name) {
+absl::Status EmptyTensor(OpKernelContext* context, absl::string_view name) {
   Tensor* tensor;
   return context->allocate_output(name, TensorShape({}), &tensor);
 }

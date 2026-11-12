@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,13 +18,19 @@
 #define SCANN_TREES_KMEANS_TREE_TRAINING_OPTIONS_H_
 
 #include <cstdint>
+#include <optional>
 
+#include "absl/base/attributes.h"
+#include "absl/time/time.h"
 #include "scann/oss_wrappers/scann_threadpool.h"
 #include "scann/proto/partitioning.pb.h"
+#include "scann/utils/common.h"
 #include "scann/utils/gmm_utils.h"
-#include "scann/utils/types.h"
 
 namespace research_scann {
+
+ABSL_ATTRIBUTE_PURE_FUNCTION static inline std::string ToString(
+    GmmUtils::Options::CenterInitializationType type);
 
 struct KMeansTreeTrainingOptions {
   KMeansTreeTrainingOptions();
@@ -35,7 +41,7 @@ struct KMeansTreeTrainingOptions {
       PartitioningConfig::GENERIC;
 
   GmmUtils::Options::PartitionAssignmentType balancing_type =
-      GmmUtils::Options::UNBALANCED;
+      GmmUtils::Options::UNBALANCED_FLOAT32;
 
   GmmUtils::Options::CenterReassignmentType reassignment_type =
       GmmUtils::Options::RANDOM_REASSIGNMENT;
@@ -64,11 +70,11 @@ struct KMeansTreeTrainingOptions {
 
   int32_t min_cluster_size = 1;
 
+  int32_t balancing_num_nearest_centroids = -1;
+
   int32_t seed = 0;
 
-  bool compute_residual_stdev = false;
-
-  double residual_stdev_min_value = 1e-5;
+  std::optional<int> first_n_centroids;
 };
 
 }  // namespace research_scann

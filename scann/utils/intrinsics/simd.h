@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,12 +15,15 @@
 #ifndef SCANN_UTILS_INTRINSICS_SIMD_H_
 #define SCANN_UTILS_INTRINSICS_SIMD_H_
 
+#include "scann/utils/intrinsics/amx.h"
 #include "scann/utils/intrinsics/attributes.h"
 #include "scann/utils/intrinsics/avx1.h"
 #include "scann/utils/intrinsics/avx2.h"
 #include "scann/utils/intrinsics/avx512.h"
+#include "scann/utils/intrinsics/avx512_vnni.h"
 #include "scann/utils/intrinsics/fallback.h"
 #include "scann/utils/intrinsics/flags.h"
+#include "scann/utils/intrinsics/highway.h"
 #include "scann/utils/intrinsics/sse4.h"
 
 #endif

@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,7 +29,7 @@ class MallocExtension {
     return false;
   }
   static absl::optional<size_t> GetNumericProperty(absl::string_view property) {
-    return absl::nullopt;
+    return std::nullopt;
   }
   static void ReleaseMemoryToSystem(size_t num_bytes) {}
   static size_t GetAllocatedSize(const void* p) { return 0; }

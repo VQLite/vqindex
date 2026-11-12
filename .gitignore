@@ -1,0 +1,8 @@
+bazel-*
+.bazelrc
+.bazel-query.sh
+libs/
+test/*.so
+__pycache__/
+tools/bazel/
+.build_python/

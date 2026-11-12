@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,10 +19,8 @@
 #include <cstdint>
 #include <memory>
 
-#include "Eigen/Core"
-#include "Eigen/QR"
 #include "absl/memory/memory.h"
-#include "absl/random/random.h"
+#include "scann/projection/internal/random_orthogonal_matrix_creator.h"
 #include "scann/utils/datapoint_utils.h"
 
 namespace research_scann {
@@ -41,28 +39,8 @@ RandomOrthogonalProjection<T>::RandomOrthogonalProjection(
 template <typename T>
 void RandomOrthogonalProjection<T>::Create() {
   random_ = std::make_unique<MTRandom>(seed_);
-
-  Eigen::MatrixXf input_matrix(input_dims_, projected_dims_);
-
-  for (size_t i = 0; i < projected_dims_; ++i) {
-    for (size_t j = 0; j < input_dims_; ++j) {
-      input_matrix(j, i) = absl::Gaussian<double>(*random_);
-    }
-  }
-
-  Eigen::HouseholderQR<Eigen::MatrixXf> qr(input_matrix);
-  Eigen::MatrixXf Q = qr.householderQ();
-
-  auto random_rotation_matrix = std::make_shared<DenseDataset<float>>();
-  for (size_t i = 0; i < projected_dims_; ++i) {
-    vector<float> current;
-    current.resize(input_dims_);
-    for (size_t j = 0; j < input_dims_; j++) {
-      current[j] = Q(j, i);
-    }
-    random_rotation_matrix->AppendOrDie(MakeDatapointPtr(current), "");
-  }
-  random_rotation_matrix_ = random_rotation_matrix;
+  random_rotation_matrix_ =
+      CreateRandomOrthogonalMatrix(input_dims_, projected_dims_, *random_);
 }
 
 template <typename T>

@@ -23,7 +23,7 @@ extern "C" {
 static PyObject* _vqlite_init(PyObject* self, PyObject* args)
 {
     char* index_dir_in = NULL;
-    int index_dir_len_in = 0;
+    Py_ssize_t index_dir_len_in = 0;
     int32_t dim = 128;
     int32_t storage_type = STORAGE_MEMORY;
     int64_t brute_threshold = 0;
@@ -59,6 +59,12 @@ static PyObject* _vqlite_search(PyObject* self, PyObject* args)
     int topk = 30, reorder_topk = 128, nprobe = 128;
     if (!PyArg_ParseTuple(args, "LO!iii", &vql_handler_i, &PyList_Type, &query_list, &topk,
             &reorder_topk, &nprobe)) {
+        Py_RETURN_NONE;
+    }
+
+    // The result buffer below is sized by topk; vqindex_search would fall back
+    // to its own default for topk == 0 and overrun it.
+    if (topk <= 0) {
         Py_RETURN_NONE;
     }
 
@@ -227,14 +233,20 @@ static PyObject* _vqlite_train(PyObject* self, PyObject* args)
 static PyObject* _vqlite_dump(PyObject* self, PyObject* args)
 {
     intptr_t vql_handler_i = 0;
-    if (!PyArg_ParseTuple(args, "L", &vql_handler_i)) {
+    // format: a dump_format_t value; omitted or negative = default format.
+    int format = -1;
+    if (!PyArg_ParseTuple(args, "L|i", &vql_handler_i, &format)) {
         Py_RETURN_FALSE;
     }
 
     void* vql_handler = (void*)(vql_handler_i);
     ret_code_t ret_d = RET_CODE_OK;
     Py_BEGIN_ALLOW_THREADS;
-    ret_d = vqindex_dump(vql_handler);
+    if (format < 0) {
+        ret_d = vqindex_dump(vql_handler);
+    } else {
+        ret_d = vqindex_dump_format(vql_handler, (dump_format_t)format);
+    }
     Py_END_ALLOW_THREADS;
 
     if (ret_d != RET_CODE_OK) {
@@ -311,7 +323,7 @@ static PyMethodDef all_methods[] = {
     { "add", _vqlite_add, METH_VARARGS, "add(handler,datasets,vids)" },
     { "release", _vqlite_release, METH_VARARGS, "release(handler)" },
     { "train", _vqlite_train, METH_VARARGS, "train(handler, train_type, nthreads)" },
-    { "dump", _vqlite_dump, METH_VARARGS, "dump(handler)" },
+    { "dump", _vqlite_dump, METH_VARARGS, "dump(handler[, format]); format: 0 packed, 1 legacy, 2 both" },
     { "stats", _vqlite_stats, METH_VARARGS, "stats(handler)" },
     { NULL, NULL, 0, NULL },
 };

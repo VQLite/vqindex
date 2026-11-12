@@ -1,6 +1,8 @@
 # Description:
 #   AVX utility function classes.
 
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
 package(
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],
@@ -9,7 +11,6 @@ package(
 cc_library(
     name = "avx_funcs",
     hdrs = ["avx_funcs.h"],
-    tags = ["local"],
     deps = [
         "//scann/utils:types",
         "//scann/utils/intrinsics:avx1",
@@ -19,7 +20,6 @@ cc_library(
 cc_library(
     name = "avx2_funcs",
     hdrs = ["avx2_funcs.h"],
-    tags = ["local"],
     deps = [
         "//scann/utils:types",
         "//scann/utils/intrinsics:avx2",

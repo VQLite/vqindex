@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,57 +23,48 @@
 
 #include "absl/base/internal/sysinfo.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/container/node_hash_set.h"
+#include "absl/strings/string_view.h"
+#include "hwy/highway.h"
 #include "scann/partitioning/partitioner.pb.h"
 #include "scann/proto/exact_reordering.pb.h"
 #include "scann/utils/types.h"
-#include "tensorflow/core/platform/cpu_info.h"
 
 namespace research_scann {
 
-#ifdef __SSE3__
-
 float MaxAbsValue(ConstSpan<float> arr) {
-  size_t num_simd_iter = arr.size() / 4;
+  namespace hn = hwy::HWY_NAMESPACE;
+  using D = hn::ScalableTag<float>;
+  const D d;
+  const size_t lanes = hn::Lanes(d);
+  size_t num_2simd_iters = arr.size() / (2 * lanes);
   const float* ptr = arr.data();
-  __m128 accumulators = _mm_setzero_ps();
-  constexpr int32_t abs_mask_scalar = 0x7FFFFFFF;
-  static const __m128 abs_mask_vector =
-      _mm_castsi128_ps(_mm_set1_epi32(abs_mask_scalar));
-
-  float result = 0.0f;
-  if (num_simd_iter != 0) {
-    for (; num_simd_iter != 0; --num_simd_iter, ptr += 4) {
-      __m128 vals = _mm_loadu_ps(ptr);
-      __m128 abs_vals = _mm_and_ps(vals, abs_mask_vector);
-      accumulators = _mm_max_ps(accumulators, abs_vals);
-    }
-
-    accumulators = _mm_max_ps(
-        accumulators, _mm_shuffle_ps(accumulators, accumulators, 0b1110));
-    result = std::max(accumulators[0], accumulators[1]);
+  auto acc0 = hn::Zero(d);
+  auto acc1 = hn::Zero(d);
+  for (; num_2simd_iters != 0; --num_2simd_iters, ptr += 2 * lanes) {
+    auto vals0 = hn::LoadU(d, ptr);
+    auto abs_vals0 = hn::Abs(vals0);
+    auto vals1 = hn::LoadU(d, ptr + lanes);
+    auto abs_vals1 = hn::Abs(vals1);
+    acc0 = hn::Max(acc0, abs_vals0);
+    acc1 = hn::Max(acc1, abs_vals1);
   }
+  acc0 = hn::Max(acc0, acc1);
 
   const float* end = arr.data() + arr.size();
+  if (end - ptr >= lanes) {
+    auto vals0 = hn::LoadU(d, ptr);
+    auto abs_vals0 = hn::Abs(vals0);
+    acc0 = hn::Max(acc0, abs_vals0);
+    ptr += lanes;
+  }
+  float result = hn::ReduceMax(d, acc0);
   for (; ptr < end; ++ptr) {
     result = std::max(result, std::abs(*ptr));
   }
-
   return result;
 }
-
-#else
-
-float MaxAbsValue(ConstSpan<float> arr) {
-  float max_abs_value = 0.0f;
-  for (float elem : arr) {
-    max_abs_value = std::max(max_abs_value, std::abs(elem));
-  }
-
-  return max_abs_value;
-}
-
-#endif
 
 void RemoveNeighborsPastLimit(DatapointIndex num_neighbors,
                               NNResultsVector* result) {
@@ -218,7 +209,7 @@ void MergeNeighborListsSwapImpl(MutableSpan<NearestNeighbors*> neighbor_lists,
     PartiallyConsumedNeighborList pc_list;
     if (list->neighbor_size() > 0) {
       pc_list.neighbor_list.Swap(list->mutable_neighbor());
-      heap.push_back(pc_list);
+      heap.push_back(std::move(pc_list));
     }
   }
 
@@ -283,7 +274,7 @@ NearestNeighbors MergeNeighborListsWithCrowding(
 
 NearestNeighbors MergeNeighborListsRemoveDuplicateDocids(
     MutableSpan<NearestNeighbors> neighbor_lists, int num_neighbors) {
-  absl::node_hash_set<std::string> prev_docids;
+  absl::flat_hash_set<std::string> prev_docids;
   auto docid_seen = [&prev_docids](const NearestNeighbors::Neighbor* nn) {
     auto iter = prev_docids.find(nn->docid());
     if (iter == prev_docids.end()) {
@@ -324,7 +315,7 @@ void PackNibblesDatapoint(const DatapointPtr<uint8_t>& hash,
   packed->clear();
   packed->set_dimensionality(hash_size);
   packed->mutable_values()->resize((hash_size + 1) / 2, 0);
-  PackNibblesDatapoint(hash.values_slice(), packed->mutable_values_slice());
+  PackNibblesDatapoint(hash.values_span(), packed->mutable_values_span());
 }
 
 void PackNibblesDatapoint(ConstSpan<uint8_t> hash,
@@ -345,7 +336,7 @@ void UnpackNibblesDatapoint(const DatapointPtr<uint8_t>& packed,
   hash->clear();
   hash->set_dimensionality(hash_size);
   hash->mutable_values()->resize(hash_size, 0);
-  UnpackNibblesDatapoint(packed.values_slice(), hash->mutable_values_slice(),
+  UnpackNibblesDatapoint(packed.values_span(), hash->mutable_values_span(),
                          hash_size);
 }
 
@@ -358,7 +349,7 @@ void UnpackNibblesDatapoint(ConstSpan<uint8_t> packed,
     hash[i * 2 + 1] = packed[i] >> 4;
   }
   if (hash_size & 1) {
-    hash[hash_size - 1] = packed[hash_size / 2];
+    hash[hash_size - 1] = packed[hash_size / 2] & 0x0f;
   }
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,33 +17,69 @@
 
 #include "absl/flags/declare.h"
 #include "absl/flags/flag.h"
+#include "scann/utils/common.h"
 #include "scann/utils/types.h"
 
 ABSL_DECLARE_FLAG(bool, ignore_avx512);
 
 ABSL_DECLARE_FLAG(bool, ignore_avx2);
 
-ABSL_DECLARE_FLAG(bool, ignore_avx);
-
 namespace research_scann {
 namespace flags_internal {
 
-extern bool should_use_avx1;
 extern bool should_use_avx2;
 extern bool should_use_avx512;
-extern bool should_use_sse4;
+extern bool should_use_avx512_vnni;
+extern bool should_use_amx;
+bool TryEnableAmx();
 
 }  // namespace flags_internal
 
-inline bool RuntimeSupportsSse4() { return flags_internal::should_use_sse4; }
-inline bool RuntimeSupportsAvx1() { return flags_internal::should_use_avx1; }
+#ifdef __x86_64__
+
+inline bool RuntimeSupportsSse4() { return true; }
+
+inline bool RuntimeSupportsAvx1() { return true; }
 inline bool RuntimeSupportsAvx2() { return flags_internal::should_use_avx2; }
 inline bool RuntimeSupportsAvx512() {
   return flags_internal::should_use_avx512;
 }
+inline bool RuntimeSupportsAvx512Vnni() {
+  return flags_internal::should_use_avx512_vnni;
+}
+
+#if (defined(__clang__) && __clang_major__ < 20) || defined(MEMORY_SANITIZER)
+
+inline bool RuntimeSupportsAmx() { return false; }
+
+#else
+
+#define SCANN_HAVE_AMX
+inline bool RuntimeSupportsAmx() {
+  if (!flags_internal::should_use_amx) return false;
+
+  static bool amx_enabled = flags_internal::TryEnableAmx();
+  return amx_enabled;
+}
+
+#endif
+
+#else
+
+inline bool RuntimeSupportsSse4() { return false; }
+inline bool RuntimeSupportsAvx1() { return false; }
+inline bool RuntimeSupportsAvx2() { return false; }
+inline bool RuntimeSupportsAvx512() { return false; }
+inline bool RuntimeSupportsAvx512Vnni() { return false; }
+inline bool RuntimeSupportsAmx() { return false; }
+
+#endif
 
 enum PlatformGeneration {
+
   kFallbackForNonX86 = 99,
+
+  kHighway = 98,
 
   kBaselineSse4 = 0,
 
@@ -52,12 +88,18 @@ enum PlatformGeneration {
   kHaswellAvx2 = 2,
 
   kSkylakeAvx512 = 3,
+
+  kCascadelakeAvx512Vnni = 4,
+
+  kSapphireRapidsAmx = 5,
 };
 
 inline string_view PlatformName(PlatformGeneration x86_arch) {
   switch (x86_arch) {
     case kFallbackForNonX86:
       return "FallbackForNonX86";
+    case kHighway:
+      return "Highway";
     case kBaselineSse4:
       return "SSE4";
     case kSandyBridgeAvx1:
@@ -66,14 +108,21 @@ inline string_view PlatformName(PlatformGeneration x86_arch) {
       return "AVX2";
     case kSkylakeAvx512:
       return "AVX512";
+    case kCascadelakeAvx512Vnni:
+      return "AVX512_VNNI";
+    case kSapphireRapidsAmx:
+      return "AMX";
     default:
       return "INVALID_X86_ARCH";
   }
 }
+inline std::ostream& operator<<(std::ostream& os, PlatformGeneration x86_arch) {
+  return os << PlatformName(x86_arch);
+}
 
 class ScopedPlatformOverride {
  public:
-  SCANN_DECLARE_MOVE_ONLY_CLASS(ScopedPlatformOverride);
+  SCANN_DECLARE_IMMOBILE_CLASS(ScopedPlatformOverride);
 
   explicit ScopedPlatformOverride(PlatformGeneration generation);
 
@@ -82,10 +131,10 @@ class ScopedPlatformOverride {
   bool IsSupported();
 
  private:
-  bool original_avx1_;
   bool original_avx2_;
   bool original_avx512_;
-  bool original_sse4_;
+  bool original_avx512_vnni_;
+  bool original_amx_;
 };
 
 ScopedPlatformOverride TestHookOverridePlatform(PlatformGeneration generation);

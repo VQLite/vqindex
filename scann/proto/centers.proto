@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,12 +20,14 @@ package research_scann;
 
 import "scann/data_format/features.proto";
 import "scann/proto/hash.proto";
+import "scann/proto/projection.proto";
 
 message CentersForAllSubspaces {
   repeated CentersForSubspace subspace_centers = 1;
-
   optional AsymmetricHasherConfig.QuantizationScheme quantization_scheme = 2
       [default = PRODUCT];
+
+  optional SerializedProjection serialized_projection = 3;
 }
 
 message CentersForSubspace {

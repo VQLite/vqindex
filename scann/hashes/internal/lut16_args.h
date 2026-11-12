@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,9 +15,11 @@
 #ifndef SCANN_HASHES_INTERNAL_LUT16_ARGS_H_
 #define SCANN_HASHES_INTERNAL_LUT16_ARGS_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 
+#include "absl/base/prefetch.h"
 #include "scann/base/restrict_allowlist.h"
 #include "scann/utils/fast_top_neighbors.h"
 #include "scann/utils/types.h"
@@ -28,11 +30,14 @@ namespace asymmetric_hashing_internal {
 inline constexpr size_t kPrefetchBytesAhead = 768;
 
 enum class PrefetchStrategy {
+
   kOff,
 
   kSeq,
 
-  kSmart
+  kSmart,
+
+  kSmartT0,
 };
 
 template <typename DistT>
@@ -110,34 +115,43 @@ struct LUT16ArgsTopN<float, TopN> : public LUT16ArgsTopNBase<float, TopN> {
       batch_filter_predicate;
 };
 
-#define SCANN_INSTANTIATE_CLASS_FOR_LUT16_BATCH_SIZES(EXTERN_KEYWORD,   \
-                                                      ClassName)        \
-  EXTERN_KEYWORD template class ClassName<1, PrefetchStrategy::kSmart>; \
-  EXTERN_KEYWORD template class ClassName<2, PrefetchStrategy::kSmart>; \
-  EXTERN_KEYWORD template class ClassName<3, PrefetchStrategy::kSmart>; \
-  EXTERN_KEYWORD template class ClassName<4, PrefetchStrategy::kSmart>; \
-  EXTERN_KEYWORD template class ClassName<5, PrefetchStrategy::kSmart>; \
-  EXTERN_KEYWORD template class ClassName<6, PrefetchStrategy::kSmart>; \
-  EXTERN_KEYWORD template class ClassName<7, PrefetchStrategy::kSmart>; \
-  EXTERN_KEYWORD template class ClassName<8, PrefetchStrategy::kSmart>; \
-  EXTERN_KEYWORD template class ClassName<9, PrefetchStrategy::kSmart>; \
-  EXTERN_KEYWORD template class ClassName<1, PrefetchStrategy::kSeq>;   \
-  EXTERN_KEYWORD template class ClassName<2, PrefetchStrategy::kSeq>;   \
-  EXTERN_KEYWORD template class ClassName<3, PrefetchStrategy::kSeq>;   \
-  EXTERN_KEYWORD template class ClassName<4, PrefetchStrategy::kSeq>;   \
-  EXTERN_KEYWORD template class ClassName<5, PrefetchStrategy::kSeq>;   \
-  EXTERN_KEYWORD template class ClassName<6, PrefetchStrategy::kSeq>;   \
-  EXTERN_KEYWORD template class ClassName<7, PrefetchStrategy::kSeq>;   \
-  EXTERN_KEYWORD template class ClassName<8, PrefetchStrategy::kSeq>;   \
-  EXTERN_KEYWORD template class ClassName<9, PrefetchStrategy::kSeq>;   \
-  EXTERN_KEYWORD template class ClassName<1, PrefetchStrategy::kOff>;   \
-  EXTERN_KEYWORD template class ClassName<2, PrefetchStrategy::kOff>;   \
-  EXTERN_KEYWORD template class ClassName<3, PrefetchStrategy::kOff>;   \
-  EXTERN_KEYWORD template class ClassName<4, PrefetchStrategy::kOff>;   \
-  EXTERN_KEYWORD template class ClassName<5, PrefetchStrategy::kOff>;   \
-  EXTERN_KEYWORD template class ClassName<6, PrefetchStrategy::kOff>;   \
-  EXTERN_KEYWORD template class ClassName<7, PrefetchStrategy::kOff>;   \
-  EXTERN_KEYWORD template class ClassName<8, PrefetchStrategy::kOff>;   \
+#define SCANN_INSTANTIATE_CLASS_FOR_LUT16_BATCH_SIZES(EXTERN_KEYWORD,     \
+                                                      ClassName)          \
+  EXTERN_KEYWORD template class ClassName<1, PrefetchStrategy::kSmart>;   \
+  EXTERN_KEYWORD template class ClassName<2, PrefetchStrategy::kSmart>;   \
+  EXTERN_KEYWORD template class ClassName<3, PrefetchStrategy::kSmart>;   \
+  EXTERN_KEYWORD template class ClassName<4, PrefetchStrategy::kSmart>;   \
+  EXTERN_KEYWORD template class ClassName<5, PrefetchStrategy::kSmart>;   \
+  EXTERN_KEYWORD template class ClassName<6, PrefetchStrategy::kSmart>;   \
+  EXTERN_KEYWORD template class ClassName<7, PrefetchStrategy::kSmart>;   \
+  EXTERN_KEYWORD template class ClassName<8, PrefetchStrategy::kSmart>;   \
+  EXTERN_KEYWORD template class ClassName<9, PrefetchStrategy::kSmart>;   \
+  EXTERN_KEYWORD template class ClassName<1, PrefetchStrategy::kSmartT0>; \
+  EXTERN_KEYWORD template class ClassName<2, PrefetchStrategy::kSmartT0>; \
+  EXTERN_KEYWORD template class ClassName<3, PrefetchStrategy::kSmartT0>; \
+  EXTERN_KEYWORD template class ClassName<4, PrefetchStrategy::kSmartT0>; \
+  EXTERN_KEYWORD template class ClassName<5, PrefetchStrategy::kSmartT0>; \
+  EXTERN_KEYWORD template class ClassName<6, PrefetchStrategy::kSmartT0>; \
+  EXTERN_KEYWORD template class ClassName<7, PrefetchStrategy::kSmartT0>; \
+  EXTERN_KEYWORD template class ClassName<8, PrefetchStrategy::kSmartT0>; \
+  EXTERN_KEYWORD template class ClassName<9, PrefetchStrategy::kSmartT0>; \
+  EXTERN_KEYWORD template class ClassName<1, PrefetchStrategy::kSeq>;     \
+  EXTERN_KEYWORD template class ClassName<2, PrefetchStrategy::kSeq>;     \
+  EXTERN_KEYWORD template class ClassName<3, PrefetchStrategy::kSeq>;     \
+  EXTERN_KEYWORD template class ClassName<4, PrefetchStrategy::kSeq>;     \
+  EXTERN_KEYWORD template class ClassName<5, PrefetchStrategy::kSeq>;     \
+  EXTERN_KEYWORD template class ClassName<6, PrefetchStrategy::kSeq>;     \
+  EXTERN_KEYWORD template class ClassName<7, PrefetchStrategy::kSeq>;     \
+  EXTERN_KEYWORD template class ClassName<8, PrefetchStrategy::kSeq>;     \
+  EXTERN_KEYWORD template class ClassName<9, PrefetchStrategy::kSeq>;     \
+  EXTERN_KEYWORD template class ClassName<1, PrefetchStrategy::kOff>;     \
+  EXTERN_KEYWORD template class ClassName<2, PrefetchStrategy::kOff>;     \
+  EXTERN_KEYWORD template class ClassName<3, PrefetchStrategy::kOff>;     \
+  EXTERN_KEYWORD template class ClassName<4, PrefetchStrategy::kOff>;     \
+  EXTERN_KEYWORD template class ClassName<5, PrefetchStrategy::kOff>;     \
+  EXTERN_KEYWORD template class ClassName<6, PrefetchStrategy::kOff>;     \
+  EXTERN_KEYWORD template class ClassName<7, PrefetchStrategy::kOff>;     \
+  EXTERN_KEYWORD template class ClassName<8, PrefetchStrategy::kOff>;     \
   EXTERN_KEYWORD template class ClassName<9, PrefetchStrategy::kOff>;
 
 }  // namespace asymmetric_hashing_internal

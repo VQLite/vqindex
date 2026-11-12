@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,25 +17,81 @@
 #ifndef SCANN_DATA_FORMAT_DATASET_H_
 #define SCANN_DATA_FORMAT_DATASET_H_
 
+#include <atomic>
 #include <memory>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
+#include "absl/base/prefetch.h"
 #include "absl/memory/memory.h"
 #include "absl/strings/str_cat.h"
 #include "scann/data_format/datapoint.h"
 #include "scann/data_format/docid_collection.h"
+#include "scann/data_format/docid_collection_interface.h"
 #include "scann/data_format/features.pb.h"
 #include "scann/data_format/sparse_low_level.h"
 #include "scann/distance_measures/distance_measure_base.h"
 #include "scann/proto/hashed.pb.h"
+#include "scann/utils/atomic.h"
 #include "scann/utils/common.h"
 #include "scann/utils/iterators.h"
 #include "scann/utils/types.h"
 #include "scann/utils/util_functions.h"
-#include "tensorflow/core/platform/prefetch.h"
 
 namespace research_scann {
+
+template <typename T>
+class TypedDatasetView;
+template <typename T>
+class DenseDatasetView;
+
+class DatasetView : public VirtualDestructor {
+ public:
+  virtual size_t size() const = 0;
+  virtual bool empty() const = 0;
+  virtual DimensionIndex dimensionality() const = 0;
+  virtual DimensionIndex NumActiveDimensions() const = 0;
+  virtual bool IsDense() const = 0;
+  virtual bool IsSparse() const = 0;
+  virtual string_view GetDocid(size_t index) const = 0;
+  virtual research_scann::TypeTag TypeTag() const = 0;
+  virtual void GetDatapoint(size_t index, Datapoint<double>* result) const = 0;
+  virtual void GetDatapoint(size_t index, Datapoint<float>* result) const = 0;
+  virtual void GetDenseDatapoint(size_t index,
+                                 Datapoint<double>* result) const = 0;
+  virtual void GetDenseDatapoint(size_t index,
+                                 Datapoint<float>* result) const = 0;
+  virtual void Prefetch(size_t index) const = 0;
+  virtual double GetDistance(const DistanceMeasure& dist, size_t vec1_index,
+                             size_t vec2_index) const = 0;
+  virtual Status MeanByDimension(Datapoint<double>* result) const = 0;
+  virtual Status MeanByDimension(ConstSpan<DatapointIndex> subset,
+                                 Datapoint<double>* result) const = 0;
+  virtual void MeanVarianceByDimension(Datapoint<double>* means,
+                                       Datapoint<double>* variances) const = 0;
+  virtual void MeanVarianceByDimension(ConstSpan<DatapointIndex> subset,
+                                       Datapoint<double>* means,
+                                       Datapoint<double>* variances) const = 0;
+  virtual Normalization normalization() const = 0;
+  virtual HashedItem::PackingStrategy packing_strategy() const = 0;
+  virtual bool is_float() const = 0;
+  virtual bool is_binary() const = 0;
+};
+
+template <typename T>
+class TypedDatasetView : public virtual DatasetView {
+ public:
+  using const_iterator = RandomAccessIterator<const TypedDatasetView<T>>;
+  const_iterator begin() const { return const_iterator(this, 0); }
+  const_iterator end() const { return const_iterator(this, this->size()); }
+
+  virtual DatapointPtr<T> operator[](size_t datapoint_index) const = 0;
+  DatapointPtr<T> at(size_t datapoint_index) const {
+    CHECK_LT(datapoint_index, this->size());
+    return operator[](datapoint_index);
+  }
+};
 
 template <typename T>
 class TypedDataset;
@@ -44,22 +100,24 @@ class DenseDataset;
 template <typename T>
 class SparseDataset;
 
-class Dataset : public VirtualDestructor {
+class Dataset : public virtual DatasetView {
  public:
   SCANN_DECLARE_MOVE_ONLY_CLASS(Dataset);
 
-  Dataset() : docids_(make_shared<VariableLengthDocidCollection>()) {}
+  Dataset()
+      : docids_(make_shared<VariableLengthDocidCollection>()),
+        dimensionality_(0) {}
 
   explicit Dataset(unique_ptr<DocidCollectionInterface> docids)
-      : docids_(std::move(docids)) {
+      : docids_(std::move(docids)), dimensionality_(0) {
     DCHECK(docids_);
   }
 
-  DatapointIndex size() const { return docids_->size(); }
+  size_t size() const final { return docids_->size(); }
 
-  bool empty() const { return size() == 0; }
+  bool empty() const final { return size() == 0; }
 
-  DimensionIndex dimensionality() const { return dimensionality_; }
+  DimensionIndex dimensionality() const final { return dimensionality_.load(); }
 
   virtual DimensionIndex NumActiveDimensions() const = 0;
 
@@ -73,7 +131,7 @@ class Dataset : public VirtualDestructor {
 
   void ReserveDocids(size_t n_docids) { docids_->Reserve(n_docids); }
 
-  string_view GetDocid(size_t index) const { return docids_->Get(index); }
+  string_view GetDocid(size_t index) const final { return docids_->Get(index); }
 
   const shared_ptr<DocidCollectionInterface>& docids() const { return docids_; }
 
@@ -85,8 +143,13 @@ class Dataset : public VirtualDestructor {
 
   virtual void GetDatapoint(size_t index, Datapoint<double>* result) const = 0;
 
+  virtual void GetDatapoint(size_t index, Datapoint<float>* result) const = 0;
+
   virtual void GetDenseDatapoint(size_t index,
                                  Datapoint<double>* result) const = 0;
+
+  virtual void GetDenseDatapoint(size_t index,
+                                 Datapoint<float>* result) const = 0;
 
   virtual void Prefetch(size_t index) const = 0;
 
@@ -109,24 +172,25 @@ class Dataset : public VirtualDestructor {
 
   virtual Status NormalizeZeroMeanUnitVariance() = 0;
 
-  Normalization normalization() const { return normalization_; }
+  Normalization normalization() const final { return normalization_; }
 
   Status NormalizeByTag(Normalization tag);
 
   void set_normalization_tag(Normalization tag) { normalization_ = tag; }
 
-  HashedItem::PackingStrategy packing_strategy() const {
+  HashedItem::PackingStrategy packing_strategy() const final {
     return packing_strategy_;
   }
 
-  virtual void set_packing_strategy(
-      HashedItem::PackingStrategy packing_strategy) {
+  void set_packing_strategy(HashedItem::PackingStrategy packing_strategy) {
     packing_strategy_ = packing_strategy;
   }
 
   virtual bool is_float() const = 0;
 
-  bool is_binary() const { return packing_strategy_ == HashedItem::BINARY; }
+  bool is_binary() const final {
+    return packing_strategy_ == HashedItem::BINARY;
+  }
 
   virtual void set_is_binary(bool val) {
     packing_strategy_ = val ? HashedItem::BINARY : HashedItem::NONE;
@@ -140,12 +204,18 @@ class Dataset : public VirtualDestructor {
 
   size_t DocidMemoryUsage() const { return docids_->MemoryUsage(); }
 
+  void AttachDocidCollection(shared_ptr<DocidCollectionInterface> docids) {
+    DCHECK(docids);
+    DCHECK_EQ(docids->size(), size());
+    set_docids_no_checks(docids);
+  }
+
   class Mutator;
   virtual StatusOr<typename Dataset::Mutator*> GetUntypedMutator() const = 0;
 
  protected:
   void set_dimensionality_no_checks(DimensionIndex dim) {
-    dimensionality_ = dim;
+    dimensionality_.store(dim);
   }
 
   void set_docids_no_checks(shared_ptr<DocidCollectionInterface> docids) {
@@ -159,13 +229,11 @@ class Dataset : public VirtualDestructor {
  private:
   shared_ptr<DocidCollectionInterface> docids_;
 
-  DimensionIndex dimensionality_ = 0;
+  RelaxedAtomic<DimensionIndex> dimensionality_;
 
   Normalization normalization_ = NONE;
 
   HashedItem::PackingStrategy packing_strategy_ = HashedItem::NONE;
-
-  virtual void UnusedKeyMethod();
 };
 
 class Dataset::Mutator : public VirtualDestructor {
@@ -181,11 +249,11 @@ class Dataset::Mutator : public VirtualDestructor {
 };
 
 template <typename T>
-class TypedDataset : public Dataset {
+class TypedDataset : public Dataset, public virtual TypedDatasetView<T> {
  public:
   SCANN_DECLARE_MOVE_ONLY_CLASS(TypedDataset);
 
-  TypedDataset() {}
+  TypedDataset() = default;
 
   explicit TypedDataset(unique_ptr<DocidCollectionInterface> docids)
       : Dataset(std::move(docids)) {}
@@ -217,6 +285,7 @@ class TypedDataset : public Dataset {
   void AppendOrDie(const GenericFeatureVector& gfv);
 
   void GetDatapoint(size_t index, Datapoint<double>* result) const final;
+  void GetDatapoint(size_t index, Datapoint<float>* result) const final;
   Status MeanByDimension(Datapoint<double>* result) const final;
   Status MeanByDimension(ConstSpan<DatapointIndex> subset,
                          Datapoint<double>* result) const final;
@@ -230,8 +299,8 @@ class TypedDataset : public Dataset {
 
   class Mutator;
   virtual StatusOr<typename TypedDataset::Mutator*> GetMutator() const = 0;
-  StatusOr<typename Dataset::Mutator*> GetUntypedMutator() const override {
-    TF_ASSIGN_OR_RETURN(Dataset::Mutator * result, GetMutator());
+  StatusOr<typename Dataset::Mutator*> GetUntypedMutator() const final {
+    SCANN_ASSIGN_OR_RETURN(Dataset::Mutator * result, GetMutator());
     return result;
   }
 };
@@ -239,20 +308,22 @@ class TypedDataset : public Dataset {
 template <typename T>
 class TypedDataset<T>::Mutator : public Dataset::Mutator {
  public:
+  virtual StatusOr<Datapoint<T>> GetDatapoint(DatapointIndex index) const = 0;
+
   virtual Status AddDatapoint(const DatapointPtr<T>& dptr,
                               string_view docid) = 0;
 
-  virtual Status RemoveDatapoint(string_view docid) = 0;
+  Status RemoveDatapoint(string_view docid) override = 0;
 
   virtual Status UpdateDatapoint(const DatapointPtr<T>& dptr,
                                  string_view docid) = 0;
 
-  virtual bool LookupDatapointIndex(string_view docid,
-                                    DatapointIndex* index) const = 0;
+  bool LookupDatapointIndex(string_view docid,
+                            DatapointIndex* index) const override = 0;
 
-  virtual void Reserve(size_t size) = 0;
+  void Reserve(size_t size) override = 0;
 
-  virtual Status RemoveDatapoint(DatapointIndex index) = 0;
+  Status RemoveDatapoint(DatapointIndex index) override = 0;
   virtual Status UpdateDatapoint(const DatapointPtr<T>& dptr,
                                  DatapointIndex index) = 0;
 };
@@ -270,7 +341,7 @@ class DenseDataset final : public TypedDataset<T> {
   DenseDataset(std::vector<T> datapoint_vec,
                unique_ptr<DocidCollectionInterface> docids);
 
-  DenseDataset(std::vector<T> datapoint_vec, size_t num_dp);
+  DenseDataset(std::vector<T>&& datapoint_vec, size_t num_dp);
 
   DenseDataset<T> Copy() const {
     auto result = DenseDataset<T>(data_, this->docids()->Copy());
@@ -297,7 +368,11 @@ class DenseDataset final : public TypedDataset<T> {
   void Resize(size_t n);
 
   template <typename Real>
-  void ConvertType(DenseDataset<Real>* target) const;
+  void ConvertType(DenseDataset<Real>* target) const {
+    ConvertType(target, this->size());
+  }
+  template <typename Real>
+  void ConvertType(DenseDataset<Real>* target, DatapointIndex first_n) const;
 
   ConstSpan<T> data() const { return data_; }
   ConstSpan<T> data(size_t index) const {
@@ -322,6 +397,7 @@ class DenseDataset final : public TypedDataset<T> {
   void set_dimensionality(DimensionIndex dimensionality) final;
   void set_is_binary(bool val) final;
   void GetDenseDatapoint(size_t index, Datapoint<double>* result) const final;
+  void GetDenseDatapoint(size_t index, Datapoint<float>* result) const final;
   inline void Prefetch(size_t index) const final;
   double GetDistance(const DistanceMeasure& dist, size_t vec1_index,
                      size_t vec2_index) const final;
@@ -338,6 +414,40 @@ class DenseDataset final : public TypedDataset<T> {
   void AppendOrDie(ConstSpan<T> values) {
     AppendOrDie(MakeDatapointPtr<T>(values), absl::StrCat(this->size()));
   }
+
+  class Mutator : public TypedDataset<T>::Mutator {
+   public:
+    SCANN_DECLARE_MOVE_ONLY_CLASS(Mutator);
+
+    static StatusOr<unique_ptr<typename DenseDataset<T>::Mutator>> Create(
+        DenseDataset<T>* dataset);
+
+    ~Mutator() final {}
+
+    StatusOr<Datapoint<T>> GetDatapoint(DatapointIndex index) const final;
+
+    Status AddDatapoint(const DatapointPtr<T>& dptr, string_view docid) final;
+
+    Status RemoveDatapoint(string_view docid) final;
+    Status RemoveDatapoint(DatapointIndex index) final;
+
+    Status UpdateDatapoint(const DatapointPtr<T>& dptr,
+                           string_view docid) final;
+    Status UpdateDatapoint(const DatapointPtr<T>& dptr,
+                           DatapointIndex index) final;
+
+    bool LookupDatapointIndex(string_view docid,
+                              DatapointIndex* index) const final;
+
+    void Reserve(size_t size) final;
+
+   private:
+    explicit Mutator(DenseDataset<T>* dataset,
+                     DocidCollectionInterface::Mutator* docid_mutator)
+        : dataset_(dataset), docid_mutator_(docid_mutator) {}
+    DenseDataset<T>* dataset_ = nullptr;
+    DocidCollectionInterface::Mutator* docid_mutator_ = nullptr;
+  };
 
   StatusOr<typename TypedDataset<T>::Mutator*> GetMutator() const final;
 
@@ -356,34 +466,87 @@ class DenseDataset final : public TypedDataset<T> {
 
 template <typename T>
 class DenseDatasetSubView;
+template <typename T>
+class RandomDatapointsSubView;
 
 template <typename T>
-class DenseDatasetView : VirtualDestructor {
+class DenseDatasetView : public virtual TypedDatasetView<T> {
  public:
-  DenseDatasetView() {}
+  DenseDatasetView() = default;
 
   virtual const T* GetPtr(size_t i) const = 0;
 
-  virtual size_t dimensionality() const = 0;
+  SCANN_INLINE ConstSpan<T> GetDatapointSpan(size_t i) const {
+    return MakeConstSpan(GetPtr(i), dimensionality());
+  }
 
-  virtual size_t size() const = 0;
+  DimensionIndex dimensionality() const override = 0;
 
-  virtual research_scann::TypeTag TypeTag() const { return TagForType<T>(); }
+  virtual size_t size() const override = 0;
+
+  research_scann::TypeTag TypeTag() const override { return TagForType<T>(); }
 
   virtual bool IsConsecutiveStorage() const { return false; }
+
+  bool empty() const override { return this->size() == 0; }
+  DimensionIndex NumActiveDimensions() const override {
+    return this->dimensionality();
+  }
+  bool IsDense() const override { return true; }
+  bool IsSparse() const override { return false; }
+  string_view GetDocid(size_t index) const override { return ""; }
+  void GetDatapoint(size_t index, Datapoint<double>* result) const override;
+  void GetDatapoint(size_t index, Datapoint<float>* result) const override;
+  void GetDenseDatapoint(size_t index,
+                         Datapoint<double>* result) const override {
+    this->GetDatapoint(index, result);
+  }
+  void GetDenseDatapoint(size_t index,
+                         Datapoint<float>* result) const override {
+    this->GetDatapoint(index, result);
+  }
+  void Prefetch(size_t index) const override {}
+  double GetDistance(const DistanceMeasure& dist, size_t vec1_index,
+                     size_t vec2_index) const override {
+    return dist.GetDistanceDense((*this)[vec1_index], (*this)[vec2_index]);
+  }
+  Normalization normalization() const override { return NONE; }
+  HashedItem::PackingStrategy packing_strategy() const override {
+    return HashedItem::NONE;
+  }
+  bool is_float() const override { return std::is_floating_point<T>::value; }
+  bool is_binary() const override { return false; }
+  DatapointPtr<T> operator[](size_t i) const override {
+    return MakeDatapointPtr<T>(nullptr, this->GetPtr(i), this->dimensionality(),
+                               this->dimensionality());
+  }
+
+  Status MeanByDimension(Datapoint<double>* result) const override;
+  Status MeanByDimension(ConstSpan<DatapointIndex> subset,
+                         Datapoint<double>* result) const override;
+  void MeanVarianceByDimension(Datapoint<double>* means,
+                               Datapoint<double>* variances) const override;
+  void MeanVarianceByDimension(ConstSpan<DatapointIndex> subset,
+                               Datapoint<double>* means,
+                               Datapoint<double>* variances) const override;
 
   virtual std::unique_ptr<DenseDatasetView<T>> subview(size_t offset,
                                                        size_t size) const {
     return std::make_unique<DenseDatasetSubView<T>>(this, offset, size);
+  }
+
+  virtual std::unique_ptr<DenseDatasetView<T>> random_datapoints_subview(
+      ConstSpan<DatapointIndex> dp_idxs) const {
+    return std::make_unique<RandomDatapointsSubView<T>>(this, dp_idxs);
   }
 };
 
 template <typename T>
 class DefaultDenseDatasetView : public DenseDatasetView<T> {
  public:
-  DefaultDenseDatasetView() {}
+  DefaultDenseDatasetView() = default;
 
-  explicit DefaultDenseDatasetView(const DenseDataset<T>& ds)
+  DefaultDenseDatasetView(const DenseDataset<T>& ds)
       : ptr_(ds.data().data()), size_(ds.size()) {
     if (ds.packing_strategy() == HashedItem::BINARY) {
       dims_ = ds.dimensionality() / 8 + (ds.dimensionality() % 8 > 0);
@@ -403,7 +566,7 @@ class DefaultDenseDatasetView : public DenseDatasetView<T> {
     return ptr_ + i * dims_;
   }
 
-  SCANN_INLINE size_t dimensionality() const final { return dims_; }
+  SCANN_INLINE DimensionIndex dimensionality() const final { return dims_; }
 
   SCANN_INLINE size_t size() const final { return size_; }
 
@@ -415,12 +578,16 @@ class DefaultDenseDatasetView : public DenseDatasetView<T> {
 
   bool IsConsecutiveStorage() const override { return true; }
 
+  ConstSpan<T> data() const { return ConstSpan<T>(ptr_, dims_ * size_); }
+
+  bool empty() const { return size_ == 0; }
+
  private:
   DefaultDenseDatasetView(const T* ptr, size_t dim, size_t size)
       : ptr_(ptr), dims_(dim), size_(size) {}
 
   const T* __restrict__ ptr_ = nullptr;
-  size_t dims_ = 0;
+  DimensionIndex dims_ = 0;
   size_t size_ = 0;
 };
 
@@ -435,7 +602,7 @@ class DenseDatasetSubView : public DenseDatasetView<T> {
     return parent_view_->GetPtr(offset_ + i);
   }
 
-  SCANN_INLINE size_t dimensionality() const final {
+  SCANN_INLINE DimensionIndex dimensionality() const final {
     return parent_view_->dimensionality();
   };
 
@@ -455,6 +622,88 @@ class DenseDatasetSubView : public DenseDatasetView<T> {
   const DenseDatasetView<T>* __restrict__ parent_view_ = nullptr;
   const size_t offset_ = 0;
   const size_t size_ = 0;
+};
+
+template <typename T>
+class RandomDatapointsSubView : public DenseDatasetView<T> {
+ public:
+  RandomDatapointsSubView(const DenseDatasetView<T>* parent,
+                          ConstSpan<DatapointIndex> dp_idxs)
+      : parent_view_(parent), dp_idxs_(dp_idxs.begin(), dp_idxs.end()) {}
+
+  SCANN_INLINE const T* GetPtr(size_t i) const final {
+    return parent_view_->GetPtr(dp_idxs_[i]);
+  }
+
+  SCANN_INLINE DimensionIndex dimensionality() const final {
+    return parent_view_->dimensionality();
+  };
+
+  SCANN_INLINE size_t size() const final { return dp_idxs_.size(); }
+
+  std::unique_ptr<DenseDatasetView<T>> subview(size_t offset,
+                                               size_t size) const final {
+    return std::make_unique<DenseDatasetSubView<T>>(this, offset, size);
+  }
+
+  bool IsConsecutiveStorage() const override { return false; }
+
+ private:
+  const DenseDatasetView<T>* __restrict__ parent_view_ = nullptr;
+  const std::vector<DatapointIndex> dp_idxs_;
+};
+
+template <typename T>
+class StridedDatasetView final : public DenseDatasetView<T> {
+ public:
+  StridedDatasetView(const T* ptr, size_t dimension, size_t stride, size_t size)
+      : ptr_(ptr), dims_(dimension), stride_(stride), size_(size) {}
+
+  SCANN_INLINE const T* GetPtr(size_t i) const final {
+    return ptr_ + i * stride_;
+  }
+
+  SCANN_INLINE DimensionIndex dimensionality() const final { return dims_; }
+
+  SCANN_INLINE size_t size() const final { return size_; }
+
+  std::unique_ptr<DenseDatasetView<T>> subview(size_t offset,
+                                               size_t size) const final {
+    CHECK_LE(offset + size, size_);
+    return absl::WrapUnique(new StridedDatasetView<T>(ptr_ + offset * stride_,
+                                                      dims_, stride_, size));
+  }
+
+ private:
+  const T* __restrict__ ptr_ = nullptr;
+  DimensionIndex dims_ = 0;
+  size_t stride_ = 0;
+  size_t size_ = 0;
+};
+
+template <typename T>
+class SpanDenseDatasetView final : public DenseDatasetView<T> {
+ public:
+  SpanDenseDatasetView(ConstSpan<T> span, size_t dimension)
+      : ptr_(span.data()),
+        dimension_(dimension),
+        size_(span.size() / dimension) {
+    CHECK_EQ(span.size() % dimension, 0);
+  }
+
+  SCANN_INLINE const T* GetPtr(size_t i) const override {
+    return ptr_ + i * dimension_;
+  }
+  SCANN_INLINE DimensionIndex dimensionality() const override {
+    return dimension_;
+  }
+  SCANN_INLINE size_t size() const override { return size_; }
+  SCANN_INLINE bool IsConsecutiveStorage() const override { return true; }
+
+ private:
+  const T* __restrict__ ptr_ = nullptr;
+  uint32_t dimension_;
+  uint32_t size_;
 };
 
 template <typename T>
@@ -513,6 +762,7 @@ class SparseDataset final : public TypedDataset<T> {
   void set_dimensionality(DimensionIndex dimensionality) final;
   DimensionIndex NumActiveDimensions() const final;
   void GetDenseDatapoint(size_t index, Datapoint<double>* result) const final;
+  void GetDenseDatapoint(size_t index, Datapoint<float>* result) const final;
   inline void Prefetch(size_t index) const final;
   double GetDistance(const DistanceMeasure& dist, size_t vec1_index,
                      size_t vec2_index) const final;
@@ -526,6 +776,9 @@ class SparseDataset final : public TypedDataset<T> {
  private:
   Status AppendImpl(const GenericFeatureVector& gfv, string_view docid);
   Status AppendImpl(const DatapointPtr<T>& dptr, string_view docid);
+
+  template <typename OutT>
+  void GetDenseDatapointImpl(size_t index, Datapoint<OutT>* result) const;
 
   mutable SparseDatasetLowLevel<DimensionIndex, T> repr_;
 
@@ -543,13 +796,14 @@ DatapointPtr<T> DenseDataset<T>::operator[](size_t i) const {
 template <typename T>
 void DenseDataset<T>::Prefetch(size_t i) const {
   DCHECK_LT(i, this->size());
-  ::tensorflow::port::prefetch<::tensorflow::port::PREFETCH_HINT_NTA>(
+  absl::PrefetchToLocalCacheNta(
       reinterpret_cast<const char*>(data_.data() + i * stride_));
 }
 
 template <typename T>
 template <typename Real>
-void DenseDataset<T>::ConvertType(DenseDataset<Real>* target) const {
+void DenseDataset<T>::ConvertType(DenseDataset<Real>* target,
+                                  DatapointIndex first_n) const {
   static_assert(std::is_floating_point<Real>(),
                 "Real template parameter must be either float or double for "
                 "DenseDataset::ConvertType.");
@@ -558,8 +812,15 @@ void DenseDataset<T>::ConvertType(DenseDataset<Real>* target) const {
   target->clear();
   target->set_dimensionality_no_checks(this->dimensionality());
   target->stride_ = stride_;
-  target->set_docids_no_checks(this->docids()->Copy());
-  target->data_.insert(target->data_.begin(), data_.begin(), data_.end());
+  first_n = std::min<size_t>(first_n, this->size());
+  if (first_n == this->size()) {
+    target->set_docids_no_checks(this->docids()->Copy());
+  } else {
+    target->set_docids_no_checks(make_unique<VariableLengthDocidCollection>(
+        VariableLengthDocidCollection::CreateWithEmptyDocids(first_n)));
+  }
+  target->data_.insert(target->data_.begin(), data_.begin(),
+                       data_.begin() + first_n * stride_);
 }
 
 template <typename T>
@@ -577,6 +838,8 @@ void SparseDataset<T>::Prefetch(size_t i) const {
   repr_.Prefetch(i);
 }
 
+SCANN_INSTANTIATE_TYPED_CLASS(extern, TypedDatasetView);
+SCANN_INSTANTIATE_TYPED_CLASS(extern, DenseDatasetView);
 SCANN_INSTANTIATE_TYPED_CLASS(extern, TypedDataset);
 SCANN_INSTANTIATE_TYPED_CLASS(extern, SparseDataset);
 SCANN_INSTANTIATE_TYPED_CLASS(extern, DenseDataset);

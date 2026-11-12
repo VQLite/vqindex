@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,15 +15,18 @@
 #ifndef SCANN_BASE_SEARCH_PARAMETERS_H_
 #define SCANN_BASE_SEARCH_PARAMETERS_H_
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <utility>
 
+#include "absl/base/optimization.h"
 #include "scann/base/restrict_allowlist.h"
 #include "scann/data_format/features.pb.h"
 #include "scann/oss_wrappers/scann_aligned_malloc.h"
+#include "scann/utils/common.h"
 #include "scann/utils/types.h"
-#include "tensorflow/core/platform/prefetch.h"
 
 namespace research_scann {
 
@@ -33,16 +36,18 @@ class SearchParameters {
  public:
   SCANN_DECLARE_MOVE_ONLY_CLASS(SearchParameters);
 
-  SearchParameters() {}
+  SearchParameters() = default;
 
   SearchParameters(
       int32_t pre_reordering_num_neighbors, float pre_reordering_epsilon,
       int32_t post_reordering_num_neighbors = numeric_limits<int32_t>::max(),
-      float post_reordering_epsilon = numeric_limits<float>::infinity())
+      float post_reordering_epsilon = numeric_limits<float>::infinity(),
+      float min_distance = -numeric_limits<float>::infinity())
       : pre_reordering_num_neighbors_(pre_reordering_num_neighbors),
         post_reordering_num_neighbors_(post_reordering_num_neighbors),
         pre_reordering_epsilon_(pre_reordering_epsilon),
-        post_reordering_epsilon_(post_reordering_epsilon) {}
+        post_reordering_epsilon_(post_reordering_epsilon),
+        min_distance_(min_distance) {}
 
   ~SearchParameters() {}
 
@@ -73,6 +78,9 @@ class SearchParameters {
     post_reordering_epsilon_ = val;
   }
 
+  float min_distance() const { return min_distance_; }
+  void set_min_distance(float val) { min_distance_ = val; }
+
   int32_t per_crowding_attribute_pre_reordering_num_neighbors() const {
     return per_crowding_attribute_pre_reordering_num_neighbors_;
   }
@@ -86,13 +94,37 @@ class SearchParameters {
     per_crowding_attribute_post_reordering_num_neighbors_ = val;
   }
 
+  struct CrowdingDimensionAttributeNumNeighbor {
+    std::string dimension;
+    std::optional<int64_t> attribute;
+    int32_t num_neighbors;
+  };
+  ConstSpan<CrowdingDimensionAttributeNumNeighbor>
+  per_crowding_dimension_attribute_post_reordering_num_neighbors() const {
+    return per_crowding_dimension_attribute_post_reordering_num_neighbors_;
+  }
+  void set_per_crowding_dimension_attribute_post_reordering_num_neighbors(
+      ConstSpan<CrowdingDimensionAttributeNumNeighbor> val) {
+    per_crowding_dimension_attribute_post_reordering_num_neighbors_ = {
+        val.begin(), val.end()};
+  }
+
   bool pre_reordering_crowding_enabled() const {
     return pre_reordering_num_neighbors_ >
            per_crowding_attribute_pre_reordering_num_neighbors_;
   }
   bool post_reordering_crowding_enabled() const {
-    return post_reordering_num_neighbors_ >
-           per_crowding_attribute_post_reordering_num_neighbors_;
+    return (post_reordering_num_neighbors_ >
+            per_crowding_attribute_post_reordering_num_neighbors_) ||
+           post_reordering_multi_dimensional_crowding_enabled();
+  }
+
+  bool post_reordering_multi_dimensional_crowding_enabled() const {
+    for (const auto& entry :
+         per_crowding_dimension_attribute_post_reordering_num_neighbors_) {
+      if (post_reordering_num_neighbors_ > entry.num_neighbors) return true;
+    }
+    return false;
   }
 
   bool crowding_enabled() const {
@@ -141,16 +173,25 @@ class SearchParameters {
     return dynamic_cast<Subclass*>(unlocked_query_preprocessing_results_.get());
   }
 
+  void set_num_random_neighbors(int32_t num_random_neighbors) {
+    num_random_neighbors_ = num_random_neighbors;
+  }
+  int32_t num_random_neighbors() const { return num_random_neighbors_; }
+
  private:
   bool sort_results_ = true;
   int32_t pre_reordering_num_neighbors_ = -1;
   int32_t post_reordering_num_neighbors_ = -1;
   float pre_reordering_epsilon_ = NAN;
   float post_reordering_epsilon_ = NAN;
+  float min_distance_ = -numeric_limits<float>::infinity();
   int per_crowding_attribute_pre_reordering_num_neighbors_ =
       numeric_limits<int32_t>::max();
   int per_crowding_attribute_post_reordering_num_neighbors_ =
       numeric_limits<int32_t>::max();
+  std::vector<CrowdingDimensionAttributeNumNeighbor>
+      per_crowding_dimension_attribute_post_reordering_num_neighbors_;
+  int32_t num_random_neighbors_ = 0;
 
   shared_ptr<const SearcherSpecificOptionalParameters>
       searcher_specific_optional_parameters_;

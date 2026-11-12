@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@
 #include <utility>
 
 #include "absl/base/internal/spinlock.h"
+#include "scann/oss_wrappers/scann_threadpool.h"
 #include "scann/utils/types.h"
 #include "scann/utils/zip_sort.h"
 
@@ -32,9 +33,9 @@ void UntypedPartitioner::set_training_parallelization_pool(
     shared_ptr<ThreadPool> pool) {}
 
 template <typename T>
-Status Partitioner<T>::TokenForDatapointBatched(const TypedDataset<T>& queries,
-                                                vector<int32_t>* results,
-                                                ThreadPool*) const {
+Status Partitioner<T>::TokenForDatapointBatched(
+    const TypedDatasetView<T>& queries, vector<int32_t>* results,
+    ThreadPool*) const {
   DCHECK(results);
   results->resize(queries.size());
   for (DatapointIndex i = 0; i < queries.size(); ++i) {
@@ -46,8 +47,8 @@ Status Partitioner<T>::TokenForDatapointBatched(const TypedDataset<T>& queries,
 
 template <typename T>
 Status Partitioner<T>::TokensForDatapointWithSpillingBatched(
-    const TypedDataset<T>& queries,
-    MutableSpan<vector<int32_t>> results) const {
+    const TypedDatasetView<T>& queries, MutableSpan<vector<int32_t>> results,
+    ThreadPool*) const {
   if (results.size() != queries.size()) {
     return InvalidArgumentError(
         absl::StrCat("queries.size must be equal to results.size.  (",
@@ -64,7 +65,7 @@ Status Partitioner<T>::TokensForDatapointWithSpillingBatched(
 
 template <typename T>
 StatusOr<vector<std::vector<DatapointIndex>>> Partitioner<T>::TokenizeDatabase(
-    const TypedDataset<T>& database, ThreadPool* pool_or_null) const {
+    const TypedDatasetView<T>& database, ThreadPool* pool_or_null) const {
   if (tokenization_mode() != DATABASE) {
     return FailedPreconditionError(
         "Cannot run TokenizeDatabase when not in database tokenization mode.");

@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,9 +15,11 @@
 #ifndef SCANN_DISTANCE_MEASURES_ONE_TO_ONE_L1_DISTANCE_H_
 #define SCANN_DISTANCE_MEASURES_ONE_TO_ONE_L1_DISTANCE_H_
 
+#include "scann/data_format/datapoint.h"
 #include "scann/distance_measures/distance_measure_base.h"
 #include "scann/distance_measures/one_to_one/common.h"
 #include "scann/distance_measures/one_to_one/l1_distance_sse4.h"
+#include "scann/utils/common.h"
 #include "scann/utils/intrinsics/flags.h"
 #include "scann/utils/reduction.h"
 #include "scann/utils/types.h"
@@ -50,7 +52,7 @@ struct L1ReduceOne {
 
 template <typename T>
 inline double L1Norm(const DatapointPtr<T>& a) {
-  return DenseSingleAccumulate(a.values_slice(), L1ReduceOne());
+  return DenseSingleAccumulate(a.values_span(), L1ReduceOne());
 }
 
 class L1Distance final : public DistanceMeasure {

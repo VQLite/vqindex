@@ -1,4 +1,4 @@
-// Copyright 2022 The Google Research Authors.
+// Copyright 2026 The Google Research Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,6 +27,9 @@
 #include "scann/distance_measures/distance_measures.h"
 #include "scann/distance_measures/many_to_many/fp8_transposed.h"
 #include "scann/distance_measures/many_to_many/many_to_many_common.h"
+#include "scann/distance_measures/many_to_many/many_to_many_floating_point.h"
+#include "scann/distance_measures/many_to_many/sfp8_transposed.h"
+#include "scann/utils/common.h"
 #include "scann/utils/fast_top_neighbors.h"
 #include "scann/utils/types.h"
 
@@ -36,117 +39,287 @@ namespace research_scann {
 
 namespace mm_internal {
 
-template <typename FloatT, typename CallbackT>
-void DenseDistanceManyToManyImpl(const DistanceMeasure& dist,
-                                 const DenseDataset<FloatT>& queries,
-                                 const DenseDataset<FloatT>& database,
-                                 ThreadPool* pool, CallbackT callback);
-
-SCANN_INSTANTIATE_MANY_TO_MANY(extern, DenseDistanceManyToManyImpl);
-
 template <typename CallbackT>
 Status DenseDistanceManyToManyFP8PretransposedImpl(
-    const DistanceMeasure& dist, const DenseDataset<float>& queries,
+    const DistanceMeasure& dist, const DefaultDenseDatasetView<float>& queries,
     const FP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
     CallbackT callback);
 
 SCANN_INSTANTIATE_MANY_TO_MANY_FP8(extern,
                                    DenseDistanceManyToManyFP8PretransposedImpl);
 
+template <typename CallbackT>
+Status DenseDistanceManyToManySFP8PretransposedImpl(
+    const DistanceMeasure& dist, const SFP8SimdBlockTransposedDatabase& queries,
+    const SFP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
+    CallbackT callback);
+
+extern template Status DenseDistanceManyToManySFP8PretransposedImpl(
+    const DistanceMeasure& dist, const SFP8SimdBlockTransposedDatabase& queries,
+    const SFP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
+    ManyToManyResultsCallback<float> callback);
+extern template Status DenseDistanceManyToManySFP8PretransposedImpl(
+    const DistanceMeasure& dist, const SFP8SimdBlockTransposedDatabase& queries,
+    const SFP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
+    EpsilonFilteringCallback<float> callback);
+extern template Status DenseDistanceManyToManySFP8PretransposedImpl(
+    const DistanceMeasure& dist, const SFP8SimdBlockTransposedDatabase& queries,
+    const SFP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
+    EpsilonFilteringOffsetWrapper<float> callback);
+
+template <typename DatabaseT, typename CallbackT>
+void DenseManyToManyOrthogonalityAmplifiedImpl(
+    const DefaultDenseDatasetView<float>& queries,
+    const DefaultDenseDatasetView<float>& normalized_residuals, float lambda,
+    const DatabaseT& database, ThreadPool* pool, CallbackT callback);
+
+extern template void DenseManyToManyOrthogonalityAmplifiedImpl(
+    const DefaultDenseDatasetView<float>& queries,
+    const DefaultDenseDatasetView<float>& normalized_residuals, float lambda,
+    const FP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
+    EpsilonFilteringOffsetWrapper<float> callback);
+extern template void DenseManyToManyOrthogonalityAmplifiedImpl(
+    const DefaultDenseDatasetView<float>& queries,
+    const DefaultDenseDatasetView<float>& normalized_residuals, float lambda,
+    const FP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
+    ManyToManyResultsCallback<float> callback);
+extern template void DenseManyToManyOrthogonalityAmplifiedImpl(
+    const DefaultDenseDatasetView<float>& queries,
+    const DefaultDenseDatasetView<float>& normalized_residuals, float lambda,
+    const DefaultDenseDatasetView<float>& database, ThreadPool* pool,
+    EpsilonFilteringCallback<float> callback);
+
+template <typename CallbackT>
+Status DenseManyToManySFP8OrthogonalityAmplifiedImpl(
+    const SFP8SimdBlockTransposedDatabase& queries,
+    const SFP8SimdBlockTransposedDatabase& normalized_residuals, float lambda,
+    const SFP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
+    CallbackT callback);
+
+extern template Status DenseManyToManySFP8OrthogonalityAmplifiedImpl(
+    const SFP8SimdBlockTransposedDatabase& queries,
+    const SFP8SimdBlockTransposedDatabase& normalized_residuals, float lambda,
+    const SFP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
+    ManyToManyResultsCallback<float> callback);
+extern template Status DenseManyToManySFP8OrthogonalityAmplifiedImpl(
+    const SFP8SimdBlockTransposedDatabase& queries,
+    const SFP8SimdBlockTransposedDatabase& normalized_residuals, float lambda,
+    const SFP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
+    EpsilonFilteringCallback<float> callback);
+extern template Status DenseManyToManySFP8OrthogonalityAmplifiedImpl(
+    const SFP8SimdBlockTransposedDatabase& queries,
+    const SFP8SimdBlockTransposedDatabase& normalized_residuals, float lambda,
+    const SFP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
+    EpsilonFilteringOffsetWrapper<float> callback);
+
 }  // namespace mm_internal
 
-template <typename FloatT>
-void DenseDistanceManyToMany(const DistanceMeasure& dist,
-                             const DenseDataset<FloatT>& queries,
-                             const DenseDataset<FloatT>& database,
-                             ManyToManyResultsCallback<FloatT> callback) {
-  mm_internal::DenseDistanceManyToManyImpl(dist, queries, database, nullptr,
-                                           std::move(callback));
+inline void DenseManyToManyOrthogonalityAmplified(
+    const DefaultDenseDatasetView<float>& queries,
+    const DefaultDenseDatasetView<float>& normalized_residuals, float lambda,
+    const FP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
+    EpsilonFilteringOffsetWrapper<float> callback) {
+  mm_internal::DenseManyToManyOrthogonalityAmplifiedImpl(
+      queries, normalized_residuals, lambda, database, pool, callback);
 }
-
-template <typename FloatT>
-void DenseDistanceManyToMany(const DistanceMeasure& dist,
-                             const DenseDataset<FloatT>& queries,
-                             const DenseDataset<FloatT>& database,
-                             ThreadPool* pool,
-                             ManyToManyResultsCallback<FloatT> callback) {
-  mm_internal::DenseDistanceManyToManyImpl(dist, queries, database, pool,
-                                           std::move(callback));
+inline void DenseManyToManyOrthogonalityAmplified(
+    const DefaultDenseDatasetView<float>& queries,
+    const DefaultDenseDatasetView<float>& normalized_residuals, float lambda,
+    const FP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
+    ManyToManyResultsCallback<float> callback) {
+  mm_internal::DenseManyToManyOrthogonalityAmplifiedImpl(
+      queries, normalized_residuals, lambda, database, pool, callback);
 }
-template <typename FloatT>
-void DenseDistanceManyToMany(const DistanceMeasure& dist,
-                             const DenseDataset<FloatT>& queries,
-                             const DenseDataset<FloatT>& database,
-                             EpsilonFilteringCallback<FloatT> callback) {
-  mm_internal::DenseDistanceManyToManyImpl(dist, queries, database, nullptr,
-                                           std::move(callback));
+inline void DenseManyToManyOrthogonalityAmplified(
+    const DefaultDenseDatasetView<float>& queries,
+    const DefaultDenseDatasetView<float>& normalized_residuals, float lambda,
+    const DefaultDenseDatasetView<float>& database, ThreadPool* pool,
+    EpsilonFilteringCallback<float> callback) {
+  mm_internal::DenseManyToManyOrthogonalityAmplifiedImpl<
+      DefaultDenseDatasetView<float>, EpsilonFilteringCallback<float>>(
+      queries, normalized_residuals, lambda, database, pool, callback);
 }
-template <typename FloatT>
-void DenseDistanceManyToMany(const DistanceMeasure& dist,
-                             const DenseDataset<FloatT>& queries,
-                             const DenseDataset<FloatT>& database,
-                             ThreadPool* pool,
-                             EpsilonFilteringCallback<FloatT> callback) {
-  mm_internal::DenseDistanceManyToManyImpl(dist, queries, database, pool,
-                                           std::move(callback));
+inline Status DenseManyToManySFP8OrthogonalityAmplified(
+    const SFP8SimdBlockTransposedDatabase& queries,
+    const SFP8SimdBlockTransposedDatabase& normalized_residuals, float lambda,
+    const SFP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
+    ManyToManyResultsCallback<float> callback) {
+  return mm_internal::DenseManyToManySFP8OrthogonalityAmplifiedImpl(
+      queries, normalized_residuals, lambda, database, pool,
+      std::move(callback));
+}
+inline Status DenseManyToManySFP8OrthogonalityAmplified(
+    const SFP8SimdBlockTransposedDatabase& queries,
+    const SFP8SimdBlockTransposedDatabase& normalized_residuals, float lambda,
+    const SFP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
+    EpsilonFilteringCallback<float> callback) {
+  return mm_internal::DenseManyToManySFP8OrthogonalityAmplifiedImpl(
+      queries, normalized_residuals, lambda, database, pool,
+      std::move(callback));
+}
+inline Status DenseManyToManySFP8OrthogonalityAmplified(
+    const SFP8SimdBlockTransposedDatabase& queries,
+    const SFP8SimdBlockTransposedDatabase& normalized_residuals, float lambda,
+    const SFP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
+    EpsilonFilteringOffsetWrapper<float> callback) {
+  return mm_internal::DenseManyToManySFP8OrthogonalityAmplifiedImpl(
+      queries, normalized_residuals, lambda, database, pool,
+      std::move(callback));
 }
 
 inline Status DenseDistanceManyToManyFP8Pretransposed(
-    const DistanceMeasure& dist, const DenseDataset<float>& queries,
+    const DistanceMeasure& dist, const DefaultDenseDatasetView<float>& queries,
     const FP8SimdBlockTransposedDatabase& database,
     ManyToManyResultsCallback<float> callback) {
   return mm_internal::DenseDistanceManyToManyFP8PretransposedImpl(
       dist, queries, database, nullptr, std::move(callback));
 }
 inline Status DenseDistanceManyToManyFP8Pretransposed(
-    const DistanceMeasure& dist, const DenseDataset<float>& queries,
+    const DistanceMeasure& dist, const DefaultDenseDatasetView<float>& queries,
     const FP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
     ManyToManyResultsCallback<float> callback) {
   return mm_internal::DenseDistanceManyToManyFP8PretransposedImpl(
       dist, queries, database, pool, std::move(callback));
 }
 inline Status DenseDistanceManyToManyFP8Pretransposed(
-    const DistanceMeasure& dist, const DenseDataset<float>& queries,
+    const DistanceMeasure& dist, const DefaultDenseDatasetView<float>& queries,
     const FP8SimdBlockTransposedDatabase& database,
     EpsilonFilteringOffsetWrapper<float> callback) {
   return mm_internal::DenseDistanceManyToManyFP8PretransposedImpl(
       dist, queries, database, nullptr, std::move(callback));
 }
 inline Status DenseDistanceManyToManyFP8Pretransposed(
-    const DistanceMeasure& dist, const DenseDataset<float>& queries,
+    const DistanceMeasure& dist, const DefaultDenseDatasetView<float>& queries,
     const FP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
     EpsilonFilteringOffsetWrapper<float> callback) {
   return mm_internal::DenseDistanceManyToManyFP8PretransposedImpl(
       dist, queries, database, pool, std::move(callback));
 }
-
-template <typename FloatT>
-vector<pair<uint32_t, FloatT>> DenseDistanceManyToManyTop1(
-    const DistanceMeasure& dist, const DenseDataset<FloatT>& queries,
-    const DenseDataset<FloatT>& database, ThreadPool* pool = nullptr) {
-  static_assert(IsSameAny<FloatT, float, double>(),
-                "DenseDistanceManyToMany only works with float/double.");
-  vector<pair<DatapointIndex, FloatT>> result(
+inline Status DenseDistanceManyToManyFP8Pretransposed(
+    const DistanceMeasure& dist, const DefaultDenseDatasetView<float>& queries,
+    const FP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
+    EpsilonFilteringCallback<float> callback) {
+  return mm_internal::DenseDistanceManyToManyFP8PretransposedImpl(
+      dist, queries, database, pool, std::move(callback));
+}
+template <typename TopN = FastTopNeighbors<float>>
+inline Status DenseDistanceManyToManyFP8PretransposedTopK(
+    const DistanceMeasure& dist, const DefaultDenseDatasetView<float>& queries,
+    const FP8SimdBlockTransposedDatabase& database, MutableSpan<TopN> topns,
+    ThreadPool* pool = nullptr) {
+  SCANN_RET_CHECK_EQ(queries.size(), topns.size());
+  ManyToManyTopKCallback<TopN> topk_callback(topns, pool);
+  EpsilonFilteringCallback<float> eps_callback(topk_callback.epsilons(),
+                                               topk_callback);
+  return DenseDistanceManyToManyFP8Pretransposed(dist, queries, database, pool,
+                                                 std::move(eps_callback));
+}
+inline StatusOr<vector<pair<DatapointIndex, float>>>
+DenseDistanceManyToManyFP8PretransposedTop1(
+    const DistanceMeasure& dist, const DefaultDenseDatasetView<float>& queries,
+    const FP8SimdBlockTransposedDatabase& database,
+    ThreadPool* pool = nullptr) {
+  vector<pair<DatapointIndex, float>> result(
       queries.size(),
-      std::make_pair(kInvalidDatapointIndex, numeric_limits<FloatT>::max()));
-  ManyToManyTop1Callback<FloatT> top1_callback(MakeMutableSpan(result));
-  EpsilonFilteringCallback<FloatT> eps_callback(top1_callback.epsilons(),
-                                                top1_callback);
-  mm_internal::DenseDistanceManyToManyImpl(dist, queries, database, pool,
-                                           eps_callback);
+      std::make_pair(kInvalidDatapointIndex, numeric_limits<float>::max()));
+  ManyToManyTop1Callback<float> top1_callback(MakeMutableSpan(result), pool);
+  EpsilonFilteringCallback<float> eps_callback(top1_callback.epsilons(),
+                                               top1_callback);
+  SCANN_RETURN_IF_ERROR(DenseDistanceManyToManyFP8Pretransposed(
+      dist, queries, database, pool, std::move(eps_callback)));
   return result;
 }
 
-inline void DenseDistanceManyToManyTopK(
-    const DistanceMeasure& dist, const DenseDataset<float>& queries,
-    const DenseDataset<float>& database,
-    MutableSpan<FastTopNeighbors<float>> topns, ThreadPool* pool = nullptr) {
-  DCHECK_EQ(queries.size(), topns.size());
-  ManyToManyTopKCallback topk_callback(topns);
+inline Status DenseDistanceManyToManySFP8Pretransposed(
+    const DistanceMeasure& dist, const SFP8SimdBlockTransposedDatabase& queries,
+    const SFP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
+    ManyToManyResultsCallback<float> callback) {
+  return mm_internal::DenseDistanceManyToManySFP8PretransposedImpl(
+      dist, queries, database, pool, std::move(callback));
+}
+inline Status DenseDistanceManyToManySFP8Pretransposed(
+    const DistanceMeasure& dist, const SFP8SimdBlockTransposedDatabase& queries,
+    const SFP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
+    EpsilonFilteringCallback<float> callback) {
+  return mm_internal::DenseDistanceManyToManySFP8PretransposedImpl(
+      dist, queries, database, pool, std::move(callback));
+}
+inline Status DenseDistanceManyToManySFP8Pretransposed(
+    const DistanceMeasure& dist, const SFP8SimdBlockTransposedDatabase& queries,
+    const SFP8SimdBlockTransposedDatabase& database, ThreadPool* pool,
+    EpsilonFilteringOffsetWrapper<float> callback) {
+  return mm_internal::DenseDistanceManyToManySFP8PretransposedImpl(
+      dist, queries, database, pool, std::move(callback));
+}
+template <typename CallbackT>
+inline Status DenseDistanceManyToManySFP8Pretransposed(
+    const DistanceMeasure& dist, const SFP8SimdBlockTransposedDatabase& queries,
+    const SFP8SimdBlockTransposedDatabase& database, CallbackT callback) {
+  return DenseDistanceManyToManySFP8Pretransposed(dist, queries, database,
+                                                  nullptr, std::move(callback));
+}
+template <typename TopN = FastTopNeighbors<float>>
+inline Status DenseDistanceManyToManySFP8PretransposedTopK(
+    const DistanceMeasure& dist, const SFP8SimdBlockTransposedDatabase& queries,
+    const SFP8SimdBlockTransposedDatabase& database, MutableSpan<TopN> topns,
+    ThreadPool* pool = nullptr) {
+  SCANN_RET_CHECK_EQ(queries.size(), topns.size());
+  ManyToManyTopKCallback<TopN> topk_callback(topns, pool);
   EpsilonFilteringCallback<float> eps_callback(topk_callback.epsilons(),
                                                topk_callback);
-  mm_internal::DenseDistanceManyToManyImpl(dist, queries, database, pool,
-                                           eps_callback);
+  return DenseDistanceManyToManySFP8Pretransposed(dist, queries, database, pool,
+                                                  std::move(eps_callback));
+}
+inline StatusOr<vector<pair<DatapointIndex, float>>>
+DenseDistanceManyToManySFP8PretransposedTop1(
+    const DistanceMeasure& dist, const SFP8SimdBlockTransposedDatabase& queries,
+    const SFP8SimdBlockTransposedDatabase& database,
+    ThreadPool* pool = nullptr) {
+  vector<pair<DatapointIndex, float>> result(
+      queries.size(),
+      std::make_pair(kInvalidDatapointIndex, numeric_limits<float>::max()));
+  ManyToManyTop1Callback<float> top1_callback(MakeMutableSpan(result), pool);
+  EpsilonFilteringCallback<float> eps_callback(top1_callback.epsilons(),
+                                               top1_callback);
+  SCANN_RETURN_IF_ERROR(DenseDistanceManyToManySFP8Pretransposed(
+      dist, queries, database, pool, std::move(eps_callback)));
+  return result;
+}
+
+inline StatusOr<vector<pair<DatapointIndex, float>>>
+DenseManyToManyOrthogonalityAmplifiedTop1(
+    const DefaultDenseDatasetView<float>& queries,
+    const DefaultDenseDatasetView<float>& normalized_residuals, float lambda,
+    const FP8SimdBlockTransposedDatabase& database,
+    ThreadPool* pool = nullptr) {
+  vector<pair<DatapointIndex, float>> result(
+      queries.size(),
+      std::make_pair(kInvalidDatapointIndex, numeric_limits<float>::max()));
+  ManyToManyTop1Callback<float> top1_callback(MakeMutableSpan(result), pool);
+  EpsilonFilteringCallback<float> eps_callback(top1_callback.epsilons(),
+                                               top1_callback);
+  DenseManyToManyOrthogonalityAmplified(queries, normalized_residuals, lambda,
+                                        database, pool,
+                                        std::move(eps_callback));
+  return result;
+}
+
+inline StatusOr<vector<pair<DatapointIndex, float>>>
+DenseManyToManySFP8OrthogonalityAmplifiedTop1(
+    const SFP8SimdBlockTransposedDatabase& queries,
+    const SFP8SimdBlockTransposedDatabase& normalized_residuals, float lambda,
+    const SFP8SimdBlockTransposedDatabase& database,
+    ThreadPool* pool = nullptr) {
+  vector<pair<DatapointIndex, float>> result(
+      queries.size(),
+      std::make_pair(kInvalidDatapointIndex, numeric_limits<float>::max()));
+  ManyToManyTop1Callback<float> top1_callback(MakeMutableSpan(result), pool);
+  EpsilonFilteringCallback<float> eps_callback(top1_callback.epsilons(),
+                                               top1_callback);
+  SCANN_RETURN_IF_ERROR(DenseManyToManySFP8OrthogonalityAmplified(
+      queries, normalized_residuals, lambda, database, pool,
+      std::move(eps_callback)));
+  return result;
 }
 
 }  // namespace research_scann
